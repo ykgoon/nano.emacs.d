@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), managed by straight.el. Not a git repo. No tests/CI/lint.
+Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), managed by straight.el. Local git repo only (syncthing path, no remote). No tests/CI/lint.
 
 ## Launch / layout
 - NOT `~/.emacs.d`: `~/.emacs.d` hosts a different production distro — never touch it.
