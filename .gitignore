@@ -1,0 +1,11 @@
+# straight.el + runtime cache
+/straight/
+/eln-cache/
+/elpa/
+/auto-save-list/
+
+# Emacs droppings
+*~
+\#*\#
+.\#*
+*.elc
