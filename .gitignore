@@ -9,3 +9,6 @@
 \#*\#
 .\#*
 *.elc
+
+# Local state (theme choice, etc.)
+/var/

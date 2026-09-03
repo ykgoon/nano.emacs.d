@@ -23,3 +23,8 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 
 ## Principles
 - Performance first. New features -> lightest solution wins. Prefer built-ins / minimal deps, lazy-load, fast startup. Justify heavy packages.
+
+## UX/UI Reference
+- Future features needing UX/UI design — learn from Spacemacs as primary reference (mnemonic SPC leader, which-key, transient states, layer organization).
+- Spacemacs impl at `~/.emacs.d` — read-only reference. Inspect via `Read`/`Grep` (e.g., `core/core-keybindings.el`, `core/core-documentation.el`, `layers/`); never `Edit`/`Write` there. Complements Launch rule: `~/.emacs.d` hosts production distro — do not modify, read only.
+- This repo currently minimal (`init.el` already seeds `spacemacs-leader-map` + `which-key`); future builds extend that pattern while staying light.
