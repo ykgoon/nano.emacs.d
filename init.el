@@ -17,6 +17,11 @@
 ;;   §5  Leader keybindings  (file / buffer / window / quit / search)
 ;;   §6  Window management  (winum, header-line number, double/triple columns)
 ;;   §7  Theme toggle + persistence  (SPC T n)
+;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
+;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
+;;   §10 Git  (magit + delta, SPC g)
+;;   §11 Project  (built-in project.el, SPC p)
+;;   §12 Search  (ripgrep via built-in project+xref, SPC s)
 ;; =====================================================================
 
 
@@ -165,6 +170,7 @@
   "SPC f" "file"
   "SPC b" "buffer"
   "SPC w" "window"
+  "SPC l" "workspace"
   "SPC q" "quit"
   "SPC s" "search"
   "SPC h" "help"
@@ -252,13 +258,22 @@
       (when n
         (propertize (format " %d " n) 'face 'nano-face-header-strong)))))
 
+(defun nano/workspace-name-string ()
+  "Return propertized current tab-bar workspace name, or nil."
+  (when (and (bound-and-true-p tab-bar-mode)
+             (fboundp 'tab-bar-tab-name-current))
+    (let ((name (ignore-errors (tab-bar-tab-name-current))))
+      (when (and name (not (string-empty-p name)))
+        (propertize (format " <%s> " name) 'face 'nano-face-header-strong)))))
+
 ;; Advise nano-modeline-compose after nano-modeline loads
 (with-eval-after-load 'nano-modeline
   (advice-add 'nano-modeline-compose :filter-args
               (lambda (args)
                 (let* ((status (nth 0 args))
+                       (ws (nano/workspace-name-string))
                        (numstr (nano/winum-number-string))
-                       (new-status (if numstr (concat numstr status) status)))
+                       (new-status (concat (or ws "") (or numstr "") status)))
                   (cons new-status (cdr args))))
               '((name . nano-winum-prefix))))
 
@@ -386,3 +401,225 @@
 
 (define-key spacemacs-leader-map (kbd "T n") 'nano/toggle-theme)
 (which-key-add-key-based-replacements "SPC T n" "toggle theme")
+
+
+;; ---------------------------------------------------------------------
+;; §8  Completion  (built-in icomplete-vertical, helm-like list)
+;; ---------------------------------------------------------------------
+;; Zero-dep helm replacement: vertical candidate list for find-file,
+;; switch-to-buffer, M-x, recentf, and any completing-read.
+;; `fido-vertical-mode' = icomplete + vertical display + ido-like keys.
+;; `flex' style gives fuzzy matching without orderless/vertico.
+(require 'icomplete)
+(fido-vertical-mode 1)
+(setq icomplete-delay-completions 0
+      icomplete-compute-delay 0
+      icomplete-show-matches-on-no-input t
+      icomplete-hide-common-prefix nil)
+(setq completion-styles '(basic substring partial-completion flex)
+      completion-category-overrides '((file (styles partial-completion))))
+(setq enable-recursive-minibuffers t
+      completion-cycle-threshold 3)
+;; History: recentf backs SPC f r (bound in §5, mode was off);
+;; savehist persists M-x / file / buffer histories across restarts.
+(recentf-mode 1)
+(savehist-mode 1)
+;; C-n/C-p + arrows come free with icomplete-vertical-mode; add C-j/C-k
+;; for evil-friendly navigation.  Displaced defaults preserved on C-M-:
+;; C-j was `icomplete-force-complete-and-exit', C-k was `icomplete-fido-kill'.
+(define-key icomplete-minibuffer-map (kbd "C-j") 'icomplete-forward-completions)
+(define-key icomplete-minibuffer-map (kbd "C-k") 'icomplete-backward-completions)
+(define-key icomplete-minibuffer-map (kbd "C-M-j") 'icomplete-force-complete-and-exit)
+(define-key icomplete-minibuffer-map (kbd "C-M-k") 'icomplete-fido-kill)
+
+
+;; ---------------------------------------------------------------------
+;; §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
+;; ---------------------------------------------------------------------
+;; Single-level Spacemacs `SPC l' equivalent: each tab = named workspace
+;; with own window config.  Zero-dep (Emacs 30 built-in), no persp-mode /
+;; eyebrowse.  Name shows twice: tab bar on top + ` <name>' prefix in
+;; nano modeline (via §6b advice on `nano-modeline-compose').
+(require 'tab-bar)
+(tab-bar-mode 1)
+(setq tab-bar-show 1
+      tab-bar-close-button-show nil
+      tab-bar-new-button-show nil
+      tab-bar-tab-hints t
+      tab-bar-new-tab-choice "*scratch*"
+      tab-bar-format '(tab-bar-format-tabs tab-bar-separator))
+
+;; 9a. Core ops  (SPC l ...)
+(define-key spacemacs-leader-map (kbd "l l") 'tab-bar-switch-to-tab)
+(define-key spacemacs-leader-map (kbd "l n") 'tab-bar-new-tab)
+(define-key spacemacs-leader-map (kbd "l d") 'tab-bar-close-tab)
+(define-key spacemacs-leader-map (kbd "l r") 'tab-bar-rename-tab)
+(define-key spacemacs-leader-map (kbd "l ]") 'tab-bar-switch-to-next-tab)
+(define-key spacemacs-leader-map (kbd "l [") 'tab-bar-switch-to-prev-tab)
+(define-key spacemacs-leader-map (kbd "l TAB") 'tab-bar-switch-to-last-tab)
+(define-key spacemacs-leader-map (kbd "l b") 'switch-to-buffer)
+(dotimes (i 9)
+  (let ((n (1+ i)))
+    (define-key spacemacs-leader-map
+                (kbd (format "l %d" n))
+                `(lambda () (interactive) (tab-bar-select-tab ,n)))))
+(which-key-add-key-based-replacements
+  "SPC l l" "switch workspace"
+  "SPC l n" "new workspace"
+  "SPC l d" "close workspace"
+  "SPC l r" "rename workspace"
+  "SPC l ]" "next workspace"
+  "SPC l [" "prev workspace"
+  "SPC l TAB" "last workspace"
+  "SPC l b" "buffer in workspace")
+
+;; 9b. Vim-style cycle (Spacemacs eyebrowse `gt/gT' parity)
+(define-key evil-motion-state-map (kbd "gt") 'tab-bar-switch-to-next-tab)
+(define-key evil-motion-state-map (kbd "gT") 'tab-bar-switch-to-prev-tab)
+
+
+;; ---------------------------------------------------------------------
+;; §10  Git  (magit + delta, SPC g)
+;; ---------------------------------------------------------------------
+;; Spacemacs `SPC g' parity, minimal subset.  magit lazy via autoloads
+;; (no `require') so startup unaffected; first `SPC g s' builds
+;; transient + with-editor + magit-section via straight.
+(straight-use-package 'magit)
+
+;; magit-delta: syntax-highlighted diffs.  Gated on `delta' binary —
+;; skipped silently when absent (no error on machines without git-delta).
+(straight-use-package 'magit-delta)
+(with-eval-after-load 'magit
+  (when (executable-find "delta")
+    (require 'magit-delta)
+    (magit-delta-mode +1)))
+
+;; Evil keys in magit buffers (Spacemacs default = evil-collection
+;; scoped to magit only, not full collection).  §3 evil-want-* vars
+;; already satisfy evil-collection requirements.
+(straight-use-package 'evil-collection)
+(with-eval-after-load 'evil
+  (with-eval-after-load 'magit
+    (when (require 'evil-collection nil t)
+      (evil-collection-init '(magit)))))
+
+;; 10a. Bindings
+(define-key spacemacs-leader-map (kbd "g s") 'magit-status)
+(define-key spacemacs-leader-map (kbd "g m") 'magit-dispatch)
+(define-key spacemacs-leader-map (kbd "g c") 'magit-clone)
+(define-key spacemacs-leader-map (kbd "g i") 'magit-init)
+(define-key spacemacs-leader-map (kbd "g L") 'magit-list-repositories)
+(define-key spacemacs-leader-map (kbd "g S") 'magit-stage-files)
+(define-key spacemacs-leader-map (kbd "g U") 'magit-unstage-files)
+(define-key spacemacs-leader-map (kbd "g f F") 'magit-find-file)
+(define-key spacemacs-leader-map (kbd "g f l") 'magit-log-buffer-file)
+(define-key spacemacs-leader-map (kbd "g f d") 'magit-diff)
+(define-key spacemacs-leader-map (kbd "g f m") 'magit-file-dispatch)
+(which-key-add-key-based-replacements
+  "SPC g" "git"
+  "SPC g s" "status"
+  "SPC g m" "dispatch"
+  "SPC g c" "clone"
+  "SPC g i" "init"
+  "SPC g L" "list repositories"
+  "SPC g S" "stage files"
+  "SPC g U" "unstage files"
+  "SPC g f" "file"
+  "SPC g f F" "find file"
+  "SPC g f l" "log file"
+  "SPC g f d" "diff"
+  "SPC g f m" "file dispatch")
+
+
+;; ---------------------------------------------------------------------
+;; §11  Project  (built-in project.el, SPC p)
+;; ---------------------------------------------------------------------
+;; Zero-dep: Emacs 30 built-in, detects .git roots, works with
+;; fido-vertical from §8.  No projectile (heavier, caching daemon).
+(require 'project)
+
+(define-key spacemacs-leader-map (kbd "p f") 'project-find-file)
+(define-key spacemacs-leader-map (kbd "p b") 'project-switch-to-buffer)
+(define-key spacemacs-leader-map (kbd "p p") 'project-switch-project)
+(define-key spacemacs-leader-map (kbd "p d") 'project-find-dir)
+(define-key spacemacs-leader-map (kbd "p g") 'project-find-regexp)
+(define-key spacemacs-leader-map (kbd "p k") 'project-kill-buffers)
+(which-key-add-key-based-replacements
+  "SPC p" "project"
+  "SPC p f" "find file"
+  "SPC p b" "switch buffer"
+  "SPC p p" "switch project"
+  "SPC p d" "find dir"
+  "SPC p g" "search (regexp)"
+  "SPC p k" "kill buffers")
+
+
+;; ---------------------------------------------------------------------
+;; §12  Search  (ripgrep via built-in project+xref, SPC s)
+;; ---------------------------------------------------------------------
+;; Minimal set, no Spacemacs sprawl (no helm-swoop/ag/pt/ack,
+;; no consult/vertico/ivy/helm/deadgrep/rg.el/fzf.el).
+;; External tool: `rg' (ripgrep 15.2.0 at /usr/bin/rg) — fastest
+;; and lightest on this machine: single static binary, respects
+;; .gitignore, skips hidden/binary, parallel.  `fd'/`ag' absent,
+;; `grep'/`find' slower, `fzf' needs a source list anyway.
+;; Zero-dep: built-in project.el + xref + fido-vertical (§8) only.
+;; SPC s s (isearch) stays in §5e; this section adds s f / s g.
+(require 'xref)
+
+;; Use rg as xref backend when present; else stay on grep.
+(when (executable-find "rg")
+  (setq xref-search-program 'ripgrep))
+
+(defvar nano/search-rg-warned nil
+  "Non-nil once missing-rg fallback warning was shown.")
+
+(defun nano/search-ensure-rg ()
+  "Return t if `rg' exists, else warn once and return nil.
+Fallback path uses built-in grep / project-find-file."
+  (if (executable-find "rg")
+      t
+    (unless nano/search-rg-warned
+      (setq nano/search-rg-warned t)
+      (message "rg not found, using grep fallback — install ripgrep for speed"))
+    nil))
+
+(defun nano/search-root ()
+  "Project root if inside one, else `default-directory'."
+  (if-let ((proj (project-current)))
+      (project-root proj)
+    default-directory))
+
+(defun nano/rg-find-file ()
+  "Find file by name with `rg --files'.  Bound to SPC s f.
+Completing-read feeds fido-vertical (§8).  Falls back to
+`project-find-file' when rg is missing or root is remote."
+  (interactive)
+  (let ((root (nano/search-root)))
+    (if (and (nano/search-ensure-rg)
+             (not (file-remote-p root)))
+        (let* ((default-directory (file-name-as-directory root))
+               (files (ignore-errors
+                        (process-lines "rg" "--files" "--hidden"
+                                       "--glob" "!.git/*"))))
+          (if (not files)
+              (user-error "SPC s f: no files found in %s" root)
+            (find-file
+             (expand-file-name
+              (completing-read "Find file (rg): " files nil t)
+              root))))
+      (call-interactively #'project-find-file))))
+
+(defun nano/search-grep ()
+  "Live-grep project with rg via `project-find-regexp'.  SPC s g.
+Uses `xref-search-program' (ripgrep when §12 set it).
+Falls back to grep backend + one-time install hint when rg missing."
+  (interactive)
+  (nano/search-ensure-rg)
+  (call-interactively #'project-find-regexp))
+
+(define-key spacemacs-leader-map (kbd "s f") 'nano/rg-find-file)
+(define-key spacemacs-leader-map (kbd "s g") 'nano/search-grep)
+(which-key-add-key-based-replacements
+  "SPC s f" "find file (rg)"
+  "SPC s g" "grep project (rg)")
