@@ -22,6 +22,9 @@
 ;;   §10 Git  (magit + delta, SPC g)
 ;;   §11 Project  (built-in project.el, SPC p)
 ;;   §12 Search  (ripgrep via built-in project+xref, SPC s)
+;;   §13 File sync  (built-in auto-revert, SPC b R fallback)
+;;   §14 Zoom  (buffer text-scale, SPC z x, repeat transient)
+;;   §15 Text  (SPC x, built-in + link-hint lazy)
 ;; =====================================================================
 
 
@@ -85,8 +88,9 @@
 ;; nano-defaults.el:92.
 
 ;; 2a. Font — Noto Sans Mono required system-wide (AGENTS.md).
-;;     Change here; must stay before nano load.
-(setq nano-font-family-monospaced "Noto Sans Mono")
+;;     Family + size tweak here; must stay before nano load.
+(setq nano-font-family-monospaced "Noto Sans Mono"
+      nano-font-size 12)
 
 ;; 2b. Theme — rougier/nano-emacs via straight.  Vendored clone at
 ;;     straight/repos/nano-emacs/.  Edit vendored code → M-x straight-rebuild-package.
@@ -174,7 +178,9 @@
   "SPC q" "quit"
   "SPC s" "search"
   "SPC h" "help"
-  "SPC T" "toggle")
+  "SPC t" "toggle"
+  "SPC z" "zoom"
+  "SPC z x" "text")
 
 
 ;; ---------------------------------------------------------------------
@@ -193,10 +199,15 @@
 (define-key spacemacs-leader-map (kbd "f r") 'recentf-open-files)
 
 ;; 5b. Buffer  (SPC b)
+(define-key spacemacs-leader-map (kbd "TAB") 'mode-line-other-buffer)
 (define-key spacemacs-leader-map (kbd "b b") 'switch-to-buffer)
 (define-key spacemacs-leader-map (kbd "b d") 'kill-current-buffer)
 (define-key spacemacs-leader-map (kbd "b n") 'next-buffer)
 (define-key spacemacs-leader-map (kbd "b p") 'previous-buffer)
+(define-key spacemacs-leader-map (kbd "b R") 'revert-buffer)
+(which-key-add-key-based-replacements
+  "SPC TAB" "last buffer"
+  "SPC b R" "revert buffer")
 
 ;; 5c. Window  (SPC w)  — basic splits & navigation
 (define-key spacemacs-leader-map (kbd "w /") 'split-window-right)   ; vsplit
@@ -247,11 +258,15 @@
 (define-key winum-keymap (kbd "M-8") 'winum-select-window-8)
 (define-key winum-keymap (kbd "M-9") 'winum-select-window-9)
 
-;; 6b. Header-line window number — visible "[n]" prefix in nano header
-;;     Injects into nano-modeline-compose without patching nano source.
-;;     Uses advice :filter-args to prepend " N " before RO/**/RW status.
+;; 6b. Modeline sections — Spacemacs blocks, bottom bar only
+;;     Layout: [N] [RO/RW/**] filename (detail) ... position <workspace>
+;;     Redefines `nano-modeline-compose' (same signature, so every mode
+;;     benefits) instead of patching nano source.  Single auto-named tab
+;;     tracks the buffer name, which used to render `<init.el> ... init.el'
+;;     (workspace + file duplicated); workspace now lives far-right and the
+;;     initial tab is named "main" in §9, so no adjacency dup.
 (defun nano/winum-number-string ()
-  "Return propertized window number for current header-line, or nil."
+  "Return propertized window number block for current window, or nil."
   (when (and (bound-and-true-p winum-mode)
              (fboundp 'winum-get-number))
     (let ((n (ignore-errors (winum-get-number (selected-window)))))
@@ -259,23 +274,76 @@
         (propertize (format " %d " n) 'face 'nano-face-header-strong)))))
 
 (defun nano/workspace-name-string ()
-  "Return propertized current tab-bar workspace name, or nil."
+  "Return propertized current tab-bar workspace block, or nil.
+Reads the tab's explicit name (`SPC l r'); unnamed tabs fall back to
+their index.  NOTE: `tab-bar-tab-name-current' is unusable here — in
+Emacs 30 it is a C subr that always derives the name from the buffer,
+which duplicated the filename in the modeline."
   (when (and (bound-and-true-p tab-bar-mode)
-             (fboundp 'tab-bar-tab-name-current))
-    (let ((name (ignore-errors (tab-bar-tab-name-current))))
+             (fboundp 'tab-bar--current-tab))
+    (let* ((tab (ignore-errors (tab-bar--current-tab)))
+           ;; NOTE: auto tabs carry (explicit-name) with nil VALUE — test
+           ;; the value, not key presence.
+           (name (or (and (alist-get 'explicit-name tab)
+                          (alist-get 'name tab))
+                     (and (fboundp 'tab-bar--current-tab-index)
+                          (ignore-errors
+                            (number-to-string
+                             (1+ (tab-bar--current-tab-index))))))))
       (when (and name (not (string-empty-p name)))
-        (propertize (format " <%s> " name) 'face 'nano-face-header-strong)))))
+        (propertize (format " <%s> " name) 'face 'nano-face-header-salient)))))
 
-;; Advise nano-modeline-compose after nano-modeline loads
+;; Drop the old status-prefix advice on reload; the redefinition below
+;; renders winum + workspace as their own blocks instead.
+(advice-remove 'nano-modeline-compose 'nano-winum-prefix)
+
 (with-eval-after-load 'nano-modeline
-  (advice-add 'nano-modeline-compose :filter-args
-              (lambda (args)
-                (let* ((status (nth 0 args))
-                       (ws (nano/workspace-name-string))
-                       (numstr (nano/winum-number-string))
-                       (new-status (concat (or ws "") (or numstr "") status)))
-                  (cons new-status (cdr args))))
-              '((name . nano-winum-prefix))))
+  (defun nano-modeline-compose (status name primary secondary)
+    "Spacemacs-block modeline: winum, RO/RW/**, filename, far-right workspace."
+    (let* ((char-width    (window-font-width nil 'mode-line))
+           (space-up       +0.15)
+           (space-down     -0.20)
+           (winum (nano/winum-number-string))
+           (ws    (nano/workspace-name-string))
+           ;; Status block — same RO/**/RW face mapping as upstream.
+           (prefix (let* ((code (cond ((string-suffix-p "RO" status) "RO")
+                                      ((string-suffix-p "**" status) "**")
+                                      ((string-suffix-p "RW" status) "RW")
+                                      (t nil)))
+                          (face (if (window-dedicated-p)
+                                    'nano-face-header-popout
+                                  (cond ((string= code "RO") 'nano-face-header-popout)
+                                        ((string= code "**") 'nano-face-header-critical)
+                                        ((string= code "RW") 'nano-face-header-faded)
+                                        (t 'nano-face-header-popout))))
+                          (text (if code
+                                    (let ((base (substring status 0 (- (length status) (length code)))))
+                                      (concat (if (string= base "") " " base)
+                                              (if (window-dedicated-p) "--" code) " "))
+                                  status)))
+                     (propertize text 'face face)))
+           (sep (propertize " " 'face 'nano-face-header-default
+                            'display `(raise ,space-down)))
+           (head (concat
+                  (or winum "")
+                  sep
+                  prefix
+                  (propertize (concat " " name " ") 'face 'nano-face-header-strong)
+                  (propertize primary 'face 'nano-face-header-default
+                              'display `(raise ,space-up))))
+           (right (concat secondary
+                          (propertize " " 'face 'nano-face-header-default
+                                      'display `(raise ,space-down))
+                          (or ws "")))
+           (available-width (- (window-total-width)
+                               (length head) (length right)
+                               (/ (window-right-divider-width) char-width)))
+           (available-width (max 1 available-width)))
+      (concat head
+              (propertize (make-string available-width ?\ )
+                          'face 'nano-face-header-default)
+              (propertize right 'face `(:inherit nano-face-header-default
+                                         :foreground ,nano-color-faded))))))
 
 ;; 6c. Double / triple vertical split — SPC w 2 / SPC w 3
 ;;     Creates two / three balanced vertical columns in current frame.
@@ -352,9 +420,9 @@
 
 
 ;; ---------------------------------------------------------------------
-;; §7  Theme toggle + persistence  (SPC T n — capital T)
+;; §7  Toggles  (SPC t n theme, SPC t w whitespace)
 ;; ---------------------------------------------------------------------
-;; Uses vendored nano-theme.el:802 `nano-toggle-theme' which checks
+;; 7a. Theme — uses vendored nano-theme.el:802 `nano-toggle-theme' which checks
 ;; `nano-theme-var' ("light"/"dark") and calls `nano-theme-set-*' +
 ;; `nano-refresh-theme'.  Wrapper handles nil (e.g. -default start)
 ;; and adds echo feedback.  Lightweight, no extra package.
@@ -388,7 +456,7 @@
           (nano-refresh-theme))))))
 
 (defun nano/toggle-theme ()
-  "Toggle nano light/dark theme.  Bound to SPC T n (capital T)."
+  "Toggle nano light/dark theme.  Bound to SPC t n."
   (interactive)
   (cond ((string= nano-theme-var "light") (nano-theme-set-dark))
         ((string= nano-theme-var "dark")  (nano-theme-set-light))
@@ -399,8 +467,35 @@
 
 (nano/theme-restore)
 
-(define-key spacemacs-leader-map (kbd "T n") 'nano/toggle-theme)
-(which-key-add-key-based-replacements "SPC T n" "toggle theme")
+;; 7b. Trailing whitespace — true red in ALL buffers, Spacemacs red parity.
+;;     Mechanism is NOT theme-only: `show-trailing-whitespace' enables the
+;;     highlight, `trailing-whitespace' face colors it.  Nano maps that face
+;;     to `nano-face-subtle' (nano-theme.el:124), so override to true red here.
+;;     `nano-refresh-theme' re-applies nano faces, so re-assert via advice.
+(setq-default show-trailing-whitespace t)
+
+(defun nano/apply-trailing-whitespace-face ()
+  "Paint `trailing-whitespace' true red.  Re-applied after theme refresh."
+  (set-face-attribute 'trailing-whitespace nil
+                      :foreground 'unspecified :background "red"))
+
+(nano/apply-trailing-whitespace-face)
+(when (fboundp 'nano-refresh-theme)
+  (advice-add 'nano-refresh-theme :after #'nano/apply-trailing-whitespace-face))
+
+(defun nano/toggle-trailing-whitespace ()
+  "Toggle trailing-whitespace highlight in all buffers.  Bound to SPC t w."
+  (interactive)
+  (let ((v (not (default-value 'show-trailing-whitespace))))
+    (setq-default show-trailing-whitespace v)
+    (dolist (b (buffer-list))
+      (with-current-buffer b (setq show-trailing-whitespace v)))
+    (message "trailing whitespace: %s" (if v "on" "off"))))
+
+(define-key spacemacs-leader-map (kbd "t n") 'nano/toggle-theme)
+(define-key spacemacs-leader-map (kbd "t w") 'nano/toggle-trailing-whitespace)
+(which-key-add-key-based-replacements "SPC t n" "toggle theme"
+                                      "SPC t w" "trailing whitespace")
 
 
 ;; ---------------------------------------------------------------------
@@ -438,20 +533,41 @@
 ;; ---------------------------------------------------------------------
 ;; Single-level Spacemacs `SPC l' equivalent: each tab = named workspace
 ;; with own window config.  Zero-dep (Emacs 30 built-in), no persp-mode /
-;; eyebrowse.  Name shows twice: tab bar on top + ` <name>' prefix in
-;; nano modeline (via §6b advice on `nano-modeline-compose').
+;; eyebrowse.  Top tab bar stays hidden (`tab-bar-show' nil reclaims the
+;; row); the name shows far-right in the bottom modeline (§6b), Spacemacs-style.
 (require 'tab-bar)
 (tab-bar-mode 1)
-(setq tab-bar-show 1
-      tab-bar-close-button-show nil
+;; NOTE: plain setq on `tab-bar-show' does NOT take effect — it has a
+;; custom :set that refreshes `tab-bar-lines' on all frames.  Must use
+;; `customize-set-variable' or the top bar stays visible.
+(customize-set-variable 'tab-bar-show nil)
+(setq tab-bar-close-button-show nil
       tab-bar-new-button-show nil
       tab-bar-tab-hints t
       tab-bar-new-tab-choice "*scratch*"
       tab-bar-format '(tab-bar-format-tabs tab-bar-separator))
 
+;; Single auto-named tab tracks the buffer name — name it "main" so the
+;; modeline shows a workspace, not a second copy of the filename.
+;; Deferred to window-setup: the first tab only settles once the initial
+;; frame exists (at init-load time the tab list may still be empty).
+;; Fresh launch always starts with one tab; no tab persistence configured.
+(add-hook 'window-setup-hook
+          (lambda ()
+            (when (and (bound-and-true-p tab-bar-mode)
+                       (= (length (tab-bar-tabs)) 1))
+              (ignore-errors (tab-bar-rename-tab "main")))))
+
+(defun nano/workspace-new-tab (arg)
+  "New workspace tab, then prompt for its name (`SPC l n').
+With prefix ARG, pass through to `tab-bar-new-tab'."
+  (interactive "P")
+  (tab-bar-new-tab arg)
+  (call-interactively #'tab-bar-rename-tab))
+
 ;; 9a. Core ops  (SPC l ...)
 (define-key spacemacs-leader-map (kbd "l l") 'tab-bar-switch-to-tab)
-(define-key spacemacs-leader-map (kbd "l n") 'tab-bar-new-tab)
+(define-key spacemacs-leader-map (kbd "l n") 'nano/workspace-new-tab)
 (define-key spacemacs-leader-map (kbd "l d") 'tab-bar-close-tab)
 (define-key spacemacs-leader-map (kbd "l r") 'tab-bar-rename-tab)
 (define-key spacemacs-leader-map (kbd "l ]") 'tab-bar-switch-to-next-tab)
@@ -623,3 +739,230 @@ Falls back to grep backend + one-time install hint when rg missing."
 (which-key-add-key-based-replacements
   "SPC s f" "find file (rg)"
   "SPC s g" "grep project (rg)")
+
+
+;; ---------------------------------------------------------------------
+;; §13  File sync  (built-in auto-revert, SPC b R fallback)
+;; ---------------------------------------------------------------------
+;; External edits (git pull, rg replace, other editor) auto-reflect.
+;; Zero-dep: built-in autorevert.el only.  Unsaved buffers never
+;; clobbered — auto-revert skips modified buffers.  SPC b R stays
+;; as manual `revert-buffer' fallback (§5b).
+(require 'autorevert)
+(global-auto-revert-mode 1)
+(setq global-auto-revert-non-file-buffers t ; dired too
+      auto-revert-verbose nil               ; quiet
+      auto-revert-remote-files nil          ; skip TRAMP, perf
+      auto-revert-use-notify t              ; inotify, no poll
+      auto-revert-check-vc-info nil)        ; perf, magit handles vc
+(add-to-list 'global-auto-revert-ignore-modes 'Buffer-menu-mode)
+
+
+;; ---------------------------------------------------------------------
+;; §14  Zoom  (buffer text-scale, SPC z x, repeat transient)
+;; ---------------------------------------------------------------------
+;; Buffer-only, Spacemacs `SPC z x' parity.  Zero-dep: built-in
+;; text-scale.el only.  Frame zoom skipped (needs zoom-frm).
+;; Step 0.5 matches Spacemacs `spacemacs/scale-up-or-down-font-size'.
+;; Each entry re-arms `set-transient-map' so + - 0 repeat without
+;; re-pressing SPC; q or any other key exits.
+(defvar nano/zoom-step 0.5
+  "Font scale step for `nano/zoom-in' / `nano/zoom-out'.")
+
+(defvar nano/zoom-repeat-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "+") 'nano/zoom-in)
+    (define-key m (kbd "=") 'nano/zoom-in)
+    (define-key m (kbd "k") 'nano/zoom-in)
+    (define-key m (kbd "-") 'nano/zoom-out)
+    (define-key m (kbd "_") 'nano/zoom-out)
+    (define-key m (kbd "j") 'nano/zoom-out)
+    (define-key m (kbd "0") 'nano/zoom-reset)
+    (define-key m (kbd "q") 'nano/zoom-quit)
+    m)
+  "Repeat keys active after one `SPC z x' zoom.")
+
+(defun nano/zoom-transient-activate ()
+  "Re-arm zoom repeat map with hint in echo area."
+  (set-transient-map nano/zoom-repeat-map t)
+  (message "zoom [+/=/k] in [-/_/j] out [0] reset [q] quit (%+d)"
+           (or (and (boundp 'text-scale-mode-amount)
+                    text-scale-mode-amount)
+               0)))
+
+(defun nano/zoom-in ()
+  "Scale buffer font up by `nano/zoom-step', then repeat."
+  (interactive)
+  (text-scale-increase nano/zoom-step)
+  (nano/zoom-transient-activate))
+
+(defun nano/zoom-out ()
+  "Scale buffer font down by `nano/zoom-step', then repeat."
+  (interactive)
+  (text-scale-decrease nano/zoom-step)
+  (nano/zoom-transient-activate))
+
+(defun nano/zoom-reset ()
+  "Reset buffer font size, then repeat."
+  (interactive)
+  (text-scale-set 0)
+  (nano/zoom-transient-activate))
+
+(defun nano/zoom-quit ()
+  "Quit zoom repeat transient."
+  (interactive)
+  (message "zoom quit"))
+
+(define-key spacemacs-leader-map (kbd "z x +") 'nano/zoom-in)
+(define-key spacemacs-leader-map (kbd "z x =") 'nano/zoom-in)
+(define-key spacemacs-leader-map (kbd "z x k") 'nano/zoom-in)
+(define-key spacemacs-leader-map (kbd "z x -") 'nano/zoom-out)
+(define-key spacemacs-leader-map (kbd "z x _") 'nano/zoom-out)
+(define-key spacemacs-leader-map (kbd "z x j") 'nano/zoom-out)
+(define-key spacemacs-leader-map (kbd "z x 0") 'nano/zoom-reset)
+(which-key-add-key-based-replacements
+  "SPC z x +" "zoom in"
+  "SPC z x =" "zoom in"
+  "SPC z x k" "zoom in"
+  "SPC z x -" "zoom out"
+  "SPC z x _" "zoom out"
+  "SPC z x j" "zoom out"
+  "SPC z x 0" "reset zoom")
+
+
+;; ---------------------------------------------------------------------
+;; §15  Text  (SPC x, built-in + link-hint lazy)
+;; ---------------------------------------------------------------------
+;; Minimal Spacemacs `SPC x' parity.  Built-ins only except link-hint
+;; (lazy, first `SPC x Y' builds avy + link-hint via straight).
+;; Skipped: xa* align, xt* transpose, xj* justification, xw* word
+;; analysis, xlr randomize, xlc column sort — niche/heavy, add on demand.
+;; Stub for future align: built-in `align-regexp' (e.g. SPC x a = aligns
+;; `=' across lines) — uncomment §15e when needed.
+
+;; 15a. Line ops — ported from Spacemacs funcs.el, evil-checks guarded.
+(defun nano/duplicate-line-or-region (&optional n)
+  "Duplicate current line, or region if active.
+With argument N, make N copies.
+With negative N, comment out original line and use the absolute value."
+  (interactive "*p")
+  (let ((use-region (use-region-p)))
+    (save-excursion
+      (let ((text (if use-region
+                      (buffer-substring (region-beginning) (region-end))
+                    (prog1 (thing-at-point 'line)
+                      (end-of-line)
+                      (if (< 0 (forward-line 1))
+                          (newline))))))
+        (dotimes (_i (abs (or n 1)))
+          (insert text))))
+    (if use-region nil
+      (let ((pos (- (point) (line-beginning-position))))
+        (if (> 0 n)
+            (comment-region (line-beginning-position) (line-end-position)))
+        (forward-line 1)
+        (forward-char pos)))))
+
+(defun nano/region-or-buffer ()
+  "Return (BEG . END) of region if active, else whole buffer."
+  (if (or (region-active-p)
+          (and (fboundp 'evil-visual-state-p)
+               (ignore-errors (evil-visual-state-p))))
+      (cons (region-beginning) (region-end))
+    (cons (point-min) (point-max))))
+
+(defun nano/sort-lines (&optional reverse)
+  "Sort lines in region or buffer.  Prefix REVERSE sorts in reverse."
+  (interactive "P")
+  (let ((r (nano/region-or-buffer)))
+    (sort-lines reverse (car r) (cdr r))))
+
+(defun nano/sort-lines-reverse ()
+  "Sort lines in reverse, in region or buffer."
+  (interactive)
+  (nano/sort-lines -1))
+
+(defun nano/uniquify-lines ()
+  "Remove duplicate adjacent lines in region or buffer."
+  (interactive)
+  (save-excursion
+    (save-restriction
+      (let ((r (nano/region-or-buffer)))
+        (goto-char (car r))
+        (while (re-search-forward "^\\(.*\n\\)\\1+" (cdr r) t)
+          (replace-match "\\1"))))))
+
+;; 15b. Built-in URL fallback — no dep.  `SPC x y' copies URL at point.
+(defun nano/copy-url-at-point ()
+  "Copy URL at point to kill-ring + clipboard.  Fallback when link-hint absent."
+  (interactive)
+  (let ((url (thing-at-point 'url t)))
+    (unless url (user-error "No URL at point"))
+    (kill-new url)
+    (when (fboundp 'gui-set-selection)
+      (ignore-errors (gui-set-selection 'CLIPBOARD url)))
+    (message "Copied: %s" url)))
+
+;; 15c. Link-hint — lazy via autoloads (no `require', zero startup cost).
+(straight-use-package 'link-hint)
+
+;; 15d. Bindings
+(define-key spacemacs-leader-map (kbd "x d SPC") 'cycle-spacing)
+(define-key spacemacs-leader-map (kbd "x d l") 'delete-blank-lines)
+(define-key spacemacs-leader-map (kbd "x d w") 'delete-trailing-whitespace)
+(define-key spacemacs-leader-map (kbd "x l d") 'nano/duplicate-line-or-region)
+(define-key spacemacs-leader-map (kbd "x l s") 'nano/sort-lines)
+(define-key spacemacs-leader-map (kbd "x l S") 'nano/sort-lines-reverse)
+(define-key spacemacs-leader-map (kbd "x l u") 'nano/uniquify-lines)
+(define-key spacemacs-leader-map (kbd "x U") 'upcase-region)
+(define-key spacemacs-leader-map (kbd "x u") 'downcase-region)
+(define-key spacemacs-leader-map (kbd "x C") 'capitalize-region)
+(define-key spacemacs-leader-map (kbd "x c") 'count-words-region)
+(define-key spacemacs-leader-map (kbd "x f") 'fill-paragraph)
+(define-key spacemacs-leader-map (kbd "x TAB") 'indent-rigidly)
+(define-key spacemacs-leader-map (kbd "x y") 'nano/copy-url-at-point)
+(define-key spacemacs-leader-map (kbd "x Y") 'link-hint-copy-link)
+(which-key-add-key-based-replacements
+  "SPC x" "text"
+  "SPC x d" "delete"
+  "SPC x d SPC" "cycle spacing"
+  "SPC x d l" "delete blank lines"
+  "SPC x d w" "delete trailing whitespace"
+  "SPC x l" "lines"
+  "SPC x l d" "duplicate line/region"
+  "SPC x l s" "sort lines"
+  "SPC x l S" "sort lines reverse"
+  "SPC x l u" "uniquify lines"
+  "SPC x U" "upcase region"
+  "SPC x u" "downcase region"
+  "SPC x C" "capitalize region"
+  "SPC x c" "count words"
+  "SPC x f" "fill paragraph"
+  "SPC x TAB" "indent rigidly"
+  "SPC x y" "copy URL at point"
+  "SPC x Y" "copy link (hint)")
+
+;; Vim-style indent-rigidly motion (Spacemacs parity)
+(with-eval-after-load 'indent
+  (define-key indent-rigidly-map "h" 'indent-rigidly-left)
+  (define-key indent-rigidly-map "l" 'indent-rigidly-right)
+  (define-key indent-rigidly-map "H" 'indent-rigidly-left-to-tab-stop)
+  (define-key indent-rigidly-map "L" 'indent-rigidly-right-to-tab-stop))
+
+;; 15e. Future align stub (built-in align-regexp, zero dep).  Uncomment to enable:
+;; (defun nano/align-repeat (start end regexp)
+;;   "Align region lines on REGEXP, auto-expanding to matching neighbors."
+;;   (interactive "r\nsAlign regexp: ")
+;;   (require 'align)
+;;   (unless (use-region-p)
+;;     (save-excursion
+;;       (while (and (string-match-p (concat "\\(\\s-*\\)" regexp) (thing-at-point 'line))
+;;                   (= 0 (forward-line -1)))
+;;         (setq start (point-at-bol))))
+;;     (save-excursion
+;;       (while (and (string-match-p (concat "\\(\\s-*\\)" regexp) (thing-at-point 'line))
+;;                   (= 0 (forward-line 1)))
+;;         (setq end (point-at-eol)))))
+;;   (align-regexp start end (concat "\\(\\s-*\\)" regexp) 1 1 t))
+;; (define-key spacemacs-leader-map (kbd "x a =") (lambda (s e) (interactive "r") (nano/align-repeat s e "=")))
+;; (define-key spacemacs-leader-map (kbd "x a |") (lambda (s e) (interactive "r") (nano/align-repeat s e "|")))
