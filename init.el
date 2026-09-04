@@ -9,7 +9,7 @@
 
 ;; =====================================================================
 ;; Table of Contents  (search "§N" to jump)
-;;   §0  Bootstrap straight.el
+;;   §0  Bootstrap straight.el (+ built-in org pin)
 ;;   §1  Startup silencing & warnings  (before nano loads)
 ;;   §2  Appearance  (font, nano theme, visual-line, GUI chrome)
 ;;   §3  Vim emulation  (evil + which-key)
@@ -27,8 +27,10 @@
 ;;   §15 Text  (SPC x, built-in + link-hint lazy)
 ;;   §16 Major-mode leader  (, + SPC m, V0 fallback + V1 org curated)
 ;;   §17  Jump  (avy, SPC j, lazy)
-;;   §18  Org  (autolist, links, tags, todo flow, babel)
+;;   §18  Org  (autolist, links, tags, todo flow, babel, agenda, random)
 ;;   §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
+;;   §20  Markdown  (markdown-mode + gfm, SPC m / ,, lazy)
+;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC a o, lazy)
 ;; =====================================================================
 
 
@@ -39,6 +41,10 @@
 ;; radian-software/straight.el:develop/install.el via url-retrieve.
 ;; `user-emacs-directory' == launch dir (~/nano.emacs.d) thanks to
 ;; --init-directory.  All clones live in straight/repos/.
+;; Pin `org' as built-in BEFORE any org-dependent package (§18a,
+;; §18d, §21) so straight never clones its 112M repo on fresh
+;; bootstrap to satisfy a Package-Requires header — built-in 9.7 used.
+(straight-use-package '(org :type built-in))
 (defvar bootstrap-version)
 (let ((bootstrap-file
         (expand-file-name "straight/repos/straight.el/bootstrap.el"
@@ -185,6 +191,8 @@
   "SPC h" "help"
   "SPC t" "toggle"
   "SPC i" "insert"
+  "SPC a" "apps"
+  "SPC a o" "roam"
   "SPC z" "zoom"
   "SPC z x" "text")
 
@@ -397,6 +405,7 @@ which duplicated the filename in the modeline."
                                          :foreground ,nano-color-faded))))))
 
 ;; 6c. Double / triple vertical split — SPC w 2 / SPC w 3
+;;     (basic SPC w splits live in §5c — this extends that group).
 ;;     Creates two / three balanced vertical columns in current frame.
 ;;     Populates w2/w3 from eligible buffers (skips ephemeral " *..." buffers).
 ;;     C-u SPC w 2 / C-u SPC w 3 (purge) forces delete-other-windows ignoring window-parameters
@@ -1081,6 +1090,8 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 ;; + babel execute (inline src_lang{} + #+BEGIN_SRC).
 ;; Mirrors layers/+emacs/org/packages.el:346-360, trimmed to
 ;; execute/navigate subset (no tangle/sessions/lob).
+;; NOTE: more org bindings appended later — §18c (todo/open/random),
+;; §21b (roam).  Edit those too for full `,' map.
 (nano/declare-major-prefix 'org-mode "d" "dates")
 (nano/declare-major-prefix 'org-mode "s" "subtree")
 (nano/declare-major-prefix 'org-mode "i" "insert")
@@ -1139,9 +1150,9 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 
 
 ;; ---------------------------------------------------------------------
-;; §18  Org  (autolist, links, tags, todo flow, babel)
+;; §18  Org  (autolist, links, tags, todo flow, babel, agenda, random)
 ;; ---------------------------------------------------------------------
-;; Built-in org 9.7 + org-autolist + built-in ob-* only.  Zero startup cost: no
+;; Built-in org 9.7 + org-autolist + org-randomnote + built-in ob-* only.  Zero startup cost: no
 ;; `require 'org'; everything lazy via hook / with-eval-after-load.
 
 ;; 18a. RET auto-item, all lists (-, +, *, 1., - [ ]).
@@ -1149,8 +1160,26 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 (straight-use-package 'org-autolist)
 (add-hook 'org-mode-hook #'org-autolist-mode)
 
-;; 18b. Link open — must be set BEFORE org loads (see its docstring).
+;; 18b. Link open + agenda files — must be set BEFORE org loads.
+;;      Machine-specific: gated on dir existence so portable machines
+;;      without ~/Dropbox/org skip silently (warn once like §12 rg).
+(defvar nano/org-directory (expand-file-name "~/Dropbox/org")
+  "Root for agenda + roam notes.  Missing dir → org scope unset.")
+(defvar nano/org-missing-warned nil
+  "Non-nil once missing `nano/org-directory' warning was shown.")
+
+(defun nano/org-ensure-directory ()
+  "Return t if `nano/org-directory' exists, else warn once and return nil."
+  (if (file-directory-p nano/org-directory)
+      t
+    (unless nano/org-missing-warned
+      (setq nano/org-missing-warned t)
+      (message "org dir %s missing, agenda/roam scope skipped" nano/org-directory))
+    nil))
+
 (setq org-mouse-1-follows-link t) ; mouse-1 click follows [[url][desc]]
+(when (file-directory-p nano/org-directory)
+  (setq org-agenda-files (list nano/org-directory))) ; agenda scope = Dropbox org dir
 
 (with-eval-after-load 'org
   ;; RET on link opens it (else autolist continues); http(s) goes
@@ -1178,10 +1207,27 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 ;; 18c. Curated leader additions (map created in §16c, hook already active).
 (nano/set-leader-keys-for-major-mode 'org-mode
   "t" 'org-todo           ; cycle TODO->NEXT->DONE
-  "o" 'org-open-at-point) ; explicit open, fallback when RET shadowed
+  "o" 'org-open-at-point  ; explicit open, fallback when RET shadowed
+  "R" 'nano/org-random-current-buffer) ; random headline, current buffer only
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'org-mode)
-  "t" "todo cycle" "o" "open link")
+  "t" "todo cycle" "o" "open link" "R" "random note (buffer)")
+
+;; 18d. Random note — tasshin/org-randomnote (lazy, zero startup cost).
+;;      Deps: dash + f (+ s via f), all lazy via straight autoloads.
+;;      `org' built-in pin lives in §0 (must precede first
+;;      org-dependent package) — not repeated here.
+;;      `, R' wraps `org-randomnote' with candidates bound to
+;;      `current-buffer', so agenda scope (§18b) stays intact for
+;;      `M-x org-randomnote' while the binding stays buffer-local.
+(straight-use-package 'org-randomnote)
+(defvar org-randomnote-candidates)
+
+(defun nano/org-random-current-buffer ()
+  "Jump to random headline in current buffer.  Bound to `, R' / `SPC m R'."
+  (interactive)
+  (let ((org-randomnote-candidates 'current-buffer))
+    (call-interactively #'org-randomnote)))
 
 
 ;; ---------------------------------------------------------------------
@@ -1302,3 +1348,137 @@ With prefix ARG, also copy to kill-ring + clipboard."
   "SPC i p p" "generate + insert password"
   "SPC i u" "insert UUID v4"
   "SPC i U" "insert UUID v4")
+
+
+;; ---------------------------------------------------------------------
+;; §20  Markdown  (jrblevin/markdown-mode, edit-only + GFM, lazy)
+;; ---------------------------------------------------------------------
+;; Zero startup cost: no `require', straight autoloads only.
+;; `gfm-mode' derives from `markdown-mode'; both get same curated
+;; `,' / `SPC m' map via §16 infra (two maps, one binding list).
+;; Edit-only: no preview/export (needs external `markdown' binary).
+;; `visual-line' already global (§2c), so no hook needed for wrap.
+(straight-use-package 'markdown-mode)
+
+;; 20a. File associations — GFM for README/GitHub, base for the rest.
+;; NOTE: `add-to-list' prepends, so generic first, specific last.
+(add-to-list 'auto-mode-alist '("\\.md\\'" . markdown-mode))
+(add-to-list 'auto-mode-alist '("\\.markdown\\'" . markdown-mode))
+(add-to-list 'auto-mode-alist '("\\.mkd\\'" . markdown-mode))
+(add-to-list 'auto-mode-alist '("\\.mdx\\'" . markdown-mode))
+(add-to-list 'auto-mode-alist '("\\.github/.*\\.md\\'" . gfm-mode))
+(add-to-list 'auto-mode-alist '("README\\.md\\'" . gfm-mode))
+
+;; 20b. Defaults, applied lazily on first md open.
+(with-eval-after-load 'markdown-mode
+  (setq markdown-fontify-code-blocks-natively t
+        markdown-hide-urls t
+        markdown-asymmetric-header t
+        markdown-list-indent-width 2
+        markdown-indent-on-enter 'indent-and-new-item))
+
+;; 20c. Curated leader — single-letter, matches C-c C-s mnemonics.
+;;      b/i/c = bold/italic/code, l/I = link/image, q/p/P = quote/pre/gfm-block,
+;;      n = list item, h = header dwim, f = footnote, o = open/follow (dwim),
+;;      v = read-only view (no external processor needed).
+(dolist (mode '(markdown-mode gfm-mode))
+  (nano/set-leader-keys-for-major-mode mode
+    "b" 'markdown-insert-bold
+    "i" 'markdown-insert-italic
+    "c" 'markdown-insert-code
+    "s" 'markdown-insert-strike-through
+    "l" 'markdown-insert-link
+    "I" 'markdown-insert-image
+    "q" 'markdown-insert-blockquote
+    "p" 'markdown-insert-pre
+    "P" 'markdown-insert-gfm-code-block
+    "n" 'markdown-insert-list-item
+    "h" 'markdown-insert-header-dwim
+    "f" 'markdown-insert-footnote
+    "o" 'markdown-do
+    "v" 'markdown-view-mode)
+  (which-key-add-keymap-based-replacements
+    (nano/major-mode-leader-map mode)
+    "b" "bold" "i" "italic"
+    "c" "code" "s" "strikethrough"
+    "l" "link" "I" "image"
+    "q" "blockquote" "p" "pre" "P" "gfm code block"
+    "n" "list item" "h" "header"
+    "f" "footnote" "o" "open/follow" "v" "view mode"))
+
+(defun nano/markdown-setup-major-leader ()
+  "Activate curated `,' / `SPC m' map in markdown/gfm buffers."
+  (nano/activate-major-leader-locally major-mode))
+(add-hook 'markdown-mode-hook #'nano/markdown-setup-major-leader)
+(add-hook 'gfm-mode-hook #'nano/markdown-setup-major-leader)
+
+
+;; ---------------------------------------------------------------------
+;; §21  Roam  (org-roam + sqlite-builtin, , r / SPC a o, lazy)
+;; ---------------------------------------------------------------------
+;; Deps reused: dash/f/s (§18d via org-randomnote), magit-section
+;; (§10 via magit build), org built-in 9.7 (§0 pin), sqlite
+;; built-in (Emacs 30, no C compiler / binary needed).
+;; New clones: org-roam + emacsql only.  Zero startup cost: no
+;; `require', straight autoloads only; autosync runs lazily
+;; on first org-roam load.
+(straight-use-package 'emacsql)
+(straight-use-package 'org-roam)
+
+;; 21a. Paths — setqs BEFORE org-roam loads (cheap, no side effect).
+;;      Directory under agenda root (§18b) so notes sync via Dropbox.
+;;      Db absolute path: sqlite-builtin connector requires it.
+;;      Dirs created lazily on first org-roam load, gated on
+;;      `nano/org-directory' (§18b) so machines without Dropbox
+;;      create nothing at startup.
+(setq org-roam-directory (expand-file-name "roam" nano/org-directory)
+      org-roam-db-location (locate-user-emacs-file "var/org-roam.db")
+      org-roam-database-connector 'sqlite-builtin
+      org-roam-db-update-on-save t
+      org-roam-dailies-directory (expand-file-name "roam/daily" nano/org-directory))
+
+(with-eval-after-load 'org-roam
+  (when (nano/org-ensure-directory)
+    (make-directory org-roam-directory t)
+    (make-directory org-roam-dailies-directory t)
+    (make-directory (file-name-directory org-roam-db-location) t))
+  ;; `org-roam-setup' is obsolete — it only enables autosync.
+  ;; Prefer autosync, fall back to setup on old vendored builds.
+  (cond ((fboundp 'org-roam-db-autosync-mode)
+         (org-roam-db-autosync-mode 1))
+        ((fboundp 'org-roam-setup)
+         (org-roam-setup))))
+
+;; 21b/c. Single source: (major-suffix global-suffix fn label).
+;;      `, r' (+ `SPC m r') in org buffers reuses §16 infra; hook
+;;      already active (§16c), so map shows once org loads.
+;;      `SPC a o' is global fallback for non-org buffers (same targets).
+;;      Dailies need no extra dep (built into roam).
+(defvar nano/org-roam-bindings
+  '(("rf"  "a o f"   org-roam-node-find              "find")
+    ("ri"  "a o i"   org-roam-node-insert            "insert")
+    ("rc"  "a o c"   org-roam-capture                "capture")
+    ("rl"  "a o l"   org-roam-buffer-toggle          "backlinks")
+    ("rg"  "a o g"   org-roam-graph                  "graph")
+    ("rs"  "a o s"   org-roam-db-sync                "sync")
+    ("ra"  "a o a"   org-roam-alias-add              "alias add")
+    ("rt"  "a o t"   org-roam-tag-add                "tag add")
+    ("rdT" "a o d T" org-roam-dailies-capture-today     "dailies today")
+    ("rdY" "a o d Y" org-roam-dailies-capture-yesterday "dailies yesterday")
+    ("rdt" "a o d t" org-roam-dailies-goto-today        "go today")
+    ("rdy" "a o d y" org-roam-dailies-goto-yesterday    "go yesterday")
+    ("rdn" "a o d n" org-roam-dailies-goto-tomorrow     "go tomorrow")
+    ("rdd" "a o d d" org-roam-dailies-goto-date         "go date"))
+  "Roam commands shared by `, r' (§21b) and `SPC a o' (§21c).")
+
+(nano/declare-major-prefix 'org-mode "r" "roam")
+(dolist (b nano/org-roam-bindings)
+  (nano/set-leader-keys-for-major-mode 'org-mode (nth 0 b) (nth 2 b))
+  (define-key spacemacs-leader-map (kbd (nth 1 b)) (nth 2 b))
+  (which-key-add-keymap-based-replacements
+   (nano/major-mode-leader-map 'org-mode) (nth 0 b) (nth 3 b))
+  (which-key-add-key-based-replacements
+   (concat "SPC " (nth 1 b)) (nth 3 b)))
+(which-key-add-key-based-replacements "SPC a o d" "dailies")
+
+;;; init.el ends here
