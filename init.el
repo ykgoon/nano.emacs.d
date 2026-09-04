@@ -28,6 +28,7 @@
 ;;   §16 Major-mode leader  (, + SPC m, V0 fallback + V1 org curated)
 ;;   §17  Jump  (avy, SPC j, lazy)
 ;;   §18  Org  (autolist, links, tags, todo flow, babel)
+;;   §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
 ;; =====================================================================
 
 
@@ -183,6 +184,7 @@
   "SPC s" "search"
   "SPC h" "help"
   "SPC t" "toggle"
+  "SPC i" "insert"
   "SPC z" "zoom"
   "SPC z x" "text")
 
@@ -1180,3 +1182,123 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'org-mode)
   "t" "todo cycle" "o" "open link")
+
+
+;; ---------------------------------------------------------------------
+;; §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
+;; ---------------------------------------------------------------------
+;; Spacemacs `SPC i' parity, minimal subset (spacemacs-editing layer:
+;; `i l' lorem, `i p' password, `i U' uuid).  Zero-dep by design:
+;; lorem-ipsum.el and uuidgen.el are absent from this Emacs build
+;; (locate-library nil on 30.0.93), and password-generator is an
+;; external dep — static text + `random' + `uuidgen' binary cover
+;; all three with zero startup cost and no straight fetch.
+
+;; 19a. Lorem ipsum — embedded text, no package.
+;;      Paragraph = 4 sentences joined; list = "- sentence" lines.
+;;      Plain = 1 unit, C-u N / M-N = N units.
+(defvar nano/lorem-sentences
+  '("Lorem ipsum dolor sit amet, consectetur adipiscing elit."
+    "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."
+    "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris."
+    "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum."
+    "Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia."
+    "Curabitur pretium tincidunt lacus, nec iaculis eros aliquam vitae."
+    "Phasellus ullamcorper velit eu nisi malesuada, a scelerisque odio ultrices."
+    "Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere.")
+  "Classic lorem ipsum sentences cycled by §19 insert commands.")
+
+(defun nano/insert-lorem-sentences (n)
+  "Insert N lorem ipsum sentences at point.  Bound to SPC i l s."
+  (interactive "p")
+  (dotimes (i (or n 1))
+    (insert (nth (% i (length nano/lorem-sentences)) nano/lorem-sentences))
+    (insert (if (= i (1- (or n 1))) "\n" " "))))
+
+(defun nano/insert-lorem-paragraphs (n)
+  "Insert N lorem ipsum paragraphs (4 sentences each).  SPC i l p."
+  (interactive "p")
+  (dotimes (p (or n 1))
+    (dotimes (i 4)
+      (insert (nth (% (+ (* p 4) i) (length nano/lorem-sentences))
+                   nano/lorem-sentences))
+      (insert " "))
+    (insert "\n")
+    (unless (= p (1- (or n 1))) (insert "\n"))))
+
+(defun nano/insert-lorem-list (n)
+  "Insert N lorem ipsum items as \"- sentence\" lines.  SPC i l l."
+  (interactive "p")
+  (dotimes (i (or n 1))
+    (insert "- " (nth (% i (length nano/lorem-sentences)) nano/lorem-sentences) "\n")))
+
+;; 19b. Password — built-in `random', alnum + symbols.
+;;      Plain = `nano/password-length', C-u N / M-N = N chars,
+;;      C-u alone prompts.  Copies to kill-ring + clipboard; echo
+;;      shows length only, never the value.
+(defvar nano/password-length 16
+  "Default length for `nano/insert-password' (SPC i p p).")
+
+(defvar nano/password-charset
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*-_=+"
+  "Characters used by `nano/insert-password'.  No ambiguous filtering.")
+
+(defun nano/insert-password (arg)
+  "Generate password and insert at point.  Bound to SPC i p p.
+With prefix ARG: numeric N uses N chars, plain C-u prompts."
+  (interactive "P")
+  (let* ((len (cond ((null arg) nano/password-length)
+                    ((integerp arg) arg)
+                    ((and (listp arg) (car arg)) (car arg))
+                    (t (read-number "Password length: " nano/password-length))))
+         (charset nano/password-charset)
+         (clen (length charset))
+         (pw (mapconcat (lambda (_) (string (aref charset (random clen))))
+                        (number-sequence 1 len) "")))
+    (kill-new pw)
+    (when (fboundp 'gui-set-selection)
+      (ignore-errors (gui-set-selection 'CLIPBOARD pw)))
+    (insert pw)
+    (message "Inserted %d-char password (copied)" len)))
+
+;; 19c. UUID v4 — `uuidgen' binary, pure-elisp fallback.
+;;      Lowercase RFC 4122 v4.  C-u also copies to kill-ring.
+(defun nano/uuid-v4-fallback ()
+  "Return random UUID v4 string without external tools."
+  (format "%08x-%04x-4%03x-%04x-%012x"
+          (random #x100000000) (random #x10000) (random #x1000)
+          (logior #x8000 (random #x4000)) (random #x1000000000000)))
+
+(defun nano/insert-uuid-v4 (arg)
+  "Insert UUID v4 at point.  Bound to SPC i u / SPC i U.
+With prefix ARG, also copy to kill-ring + clipboard."
+  (interactive "P")
+  (let ((uuid (or (and (executable-find "uuidgen")
+                       (ignore-errors (car (process-lines "uuidgen"))))
+                  (nano/uuid-v4-fallback))))
+    (setq uuid (downcase uuid))
+    (when arg
+      (kill-new uuid)
+      (when (fboundp 'gui-set-selection)
+        (ignore-errors (gui-set-selection 'CLIPBOARD uuid))))
+    (insert uuid)
+    (message "Inserted UUID: %s" uuid)))
+
+;; 19d. Bindings (Spacemacs mnemonics: i l s/p/l, i p p, i u;
+;;      i U kept as Spacemacs-compat alias for i u).
+(define-key spacemacs-leader-map (kbd "i l s") 'nano/insert-lorem-sentences)
+(define-key spacemacs-leader-map (kbd "i l p") 'nano/insert-lorem-paragraphs)
+(define-key spacemacs-leader-map (kbd "i l l") 'nano/insert-lorem-list)
+(define-key spacemacs-leader-map (kbd "i p p") 'nano/insert-password)
+(define-key spacemacs-leader-map (kbd "i u") 'nano/insert-uuid-v4)
+(define-key spacemacs-leader-map (kbd "i U") 'nano/insert-uuid-v4)
+(which-key-add-key-based-replacements
+  "SPC i" "insert"
+  "SPC i l" "lorem ipsum"
+  "SPC i l s" "insert sentences"
+  "SPC i l p" "insert paragraphs"
+  "SPC i l l" "insert list"
+  "SPC i p" "password"
+  "SPC i p p" "generate + insert password"
+  "SPC i u" "insert UUID v4"
+  "SPC i U" "insert UUID v4")
