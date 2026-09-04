@@ -25,6 +25,9 @@
 ;;   §13 File sync  (built-in auto-revert, SPC b R fallback)
 ;;   §14 Zoom  (buffer text-scale, SPC z x, repeat transient)
 ;;   §15 Text  (SPC x, built-in + link-hint lazy)
+;;   §16 Major-mode leader  (, + SPC m, V0 fallback + V1 org curated)
+;;   §17  Jump  (avy, SPC j, lazy)
+;;   §18  Org  (autolist, links, tags, todo flow, babel)
 ;; =====================================================================
 
 
@@ -173,6 +176,7 @@
 (which-key-add-key-based-replacements
   "SPC f" "file"
   "SPC b" "buffer"
+  "SPC j" "jump"
   "SPC w" "window"
   "SPC l" "workspace"
   "SPC q" "quit"
@@ -205,9 +209,33 @@
 (define-key spacemacs-leader-map (kbd "b n") 'next-buffer)
 (define-key spacemacs-leader-map (kbd "b p") 'previous-buffer)
 (define-key spacemacs-leader-map (kbd "b R") 'revert-buffer)
+(define-key spacemacs-leader-map (kbd "b s") 'nano/switch-to-scratch-buffer)
+(define-key spacemacs-leader-map (kbd "b Y") 'nano/copy-whole-buffer-to-clipboard)
 (which-key-add-key-based-replacements
   "SPC TAB" "last buffer"
-  "SPC b R" "revert buffer")
+  "SPC b R" "revert buffer"
+  "SPC b s" "scratch buffer"
+  "SPC b Y" "copy buffer")
+
+(defun nano/switch-to-scratch-buffer (&optional arg)
+  "Switch to `*scratch*', creating it first if needed.
+With prefix ARG, open in another window.
+Fresh buffer defaults to `lisp-interaction-mode'."
+  (interactive "P")
+  (let ((scratch (get-buffer-create "*scratch*")))
+    (with-current-buffer scratch
+      (when (= (buffer-size) 0)
+        (unless (eq major-mode 'lisp-interaction-mode)
+          (lisp-interaction-mode))))
+    (if arg
+        (switch-to-buffer-other-window scratch)
+      (switch-to-buffer scratch))))
+
+(defun nano/copy-whole-buffer-to-clipboard ()
+  "Copy entire buffer to kill-ring + clipboard.  Bound to SPC b Y."
+  (interactive)
+  (clipboard-kill-ring-save (point-min) (point-max))
+  (message "Copied: %d chars" (- (point-max) (point-min))))
 
 ;; 5c. Window  (SPC w)  — basic splits & navigation
 (define-key spacemacs-leader-map (kbd "w /") 'split-window-right)   ; vsplit
@@ -223,9 +251,30 @@
 ;; SPC w 2 / SPC w 3 (double/triple columns) defined in §6c — kept with its implementation.
 
 ;; 5d. Quit / session  (SPC q)
+;; SPC q r restores file buffers via built-in desktop-save-mode
+;; (var/desktop/).  Tab-bar workspaces (§9) are NOT restored —
+;; desktop persists buffers only.  Restart keeps --init-directory
+;; since builtin `restart-emacs' re-execs same argv.
+(require 'desktop)
+(setq desktop-dirname (locate-user-emacs-file "var/desktop")
+      desktop-path (list desktop-dirname)
+      desktop-save t
+      desktop-load-locked-desktop nil
+      desktop-restore-eager 10
+      desktop-restore-frames nil)
+(make-directory desktop-dirname t)
+(desktop-save-mode 1)
+
+(defun nano/restart-emacs-restore ()
+  "Save desktop session, then restart.  Bound to SPC q r."
+  (interactive)
+  (desktop-save-in-desktop-dir)
+  (restart-emacs))
+
 (define-key spacemacs-leader-map (kbd "q q") 'save-buffers-kill-terminal)
 (define-key spacemacs-leader-map (kbd "q Q") 'kill-emacs)
-(define-key spacemacs-leader-map (kbd "q r") 'restart-emacs)
+(define-key spacemacs-leader-map (kbd "q r") 'nano/restart-emacs-restore)
+(which-key-add-key-based-replacements "SPC q r" "restart + restore")
 
 ;; 5e. Search & help  (SPC s / SPC h)
 (define-key spacemacs-leader-map (kbd "s s") 'isearch-forward)
@@ -966,3 +1015,168 @@ With negative N, comment out original line and use the absolute value."
 ;;   (align-regexp start end (concat "\\(\\s-*\\)" regexp) 1 1 t))
 ;; (define-key spacemacs-leader-map (kbd "x a =") (lambda (s e) (interactive "r") (nano/align-repeat s e "=")))
 ;; (define-key spacemacs-leader-map (kbd "x a |") (lambda (s e) (interactive "r") (nano/align-repeat s e "|")))
+
+
+;; ---------------------------------------------------------------------
+;; §16  Major-mode leader  (, + SPC m, V0 fallback + V1 org curated)
+;; ---------------------------------------------------------------------
+;; Spacemacs parity: `,' == `SPC m' (core-keybindings.el:103-132 uses
+;; bind-map for this; we skip that dep).  V0 = show native mode map
+;; anywhere; V1 = curated prefix per mode, buffer-local so it shadows
+;; V0 only in that mode.  Org seed mirrors
+;; layers/+emacs/org/packages.el:246-266 (dates), :312 (refile),
+;; :380/:388 (insert template/link) — trimmed to user subset.
+;; NOTE: `,' shadows evil `evil-repeat-find-char-reverse' — intended,
+;; matches Spacemacs (`dotspacemacs-major-mode-leader-key ","').
+
+;; 16a. V0 fallback — native mode bindings via which-key (zero upkeep).
+(defun nano/v0-show-major-mode ()
+  "Show native bindings of current major-mode.  V0 fallback for `,' / `SPC m'."
+  (interactive)
+  (which-key-show-major-mode))
+
+(define-key evil-normal-state-map (kbd ",") 'nano/v0-show-major-mode)
+(define-key evil-visual-state-map (kbd ",") 'nano/v0-show-major-mode)
+(define-key evil-motion-state-map (kbd ",") 'nano/v0-show-major-mode)
+(define-key spacemacs-leader-map (kbd "m") 'nano/v0-show-major-mode)
+(which-key-add-key-based-replacements "SPC m" "major-mode")
+
+;; 16b. V1 infra — per-mode curated prefix maps (no bind-map dep).
+(defvar nano/major-mode-leader-maps (make-hash-table :test 'eq)
+  "Hash MODE -> curated major-mode prefix keymap.")
+
+(defun nano/major-mode-leader-map (mode)
+  "Return curated prefix map for MODE, creating it on first use."
+  (or (gethash mode nano/major-mode-leader-maps)
+      (let ((m (make-sparse-keymap)))
+        (puthash mode m nano/major-mode-leader-maps)
+        m)))
+
+(defun nano/set-leader-keys-for-major-mode (mode key def &rest bindings)
+  "Bind KEY to DEF in MODE's curated map.  Accepts extra KEY DEF pairs.
+Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
+  (let ((map (nano/major-mode-leader-map mode)))
+    (while key
+      (define-key map (kbd key) def)
+      (setq key (pop bindings) def (pop bindings)))))
+
+(defun nano/declare-major-prefix (mode prefix label)
+  "Label PREFIX (e.g. \"d\") as LABEL in MODE's curated map for which-key."
+  (which-key-add-keymap-based-replacements
+   (nano/major-mode-leader-map mode) prefix label))
+
+(defun nano/activate-major-leader-locally (mode)
+  "Shadow global `,' / `SPC m' with MODE's curated map in current buffer."
+  (let ((map (nano/major-mode-leader-map mode)))
+    (evil-local-set-key 'normal (kbd ",") map)
+    (evil-local-set-key 'visual (kbd ",") map)
+    (evil-local-set-key 'motion (kbd ",") map)
+    (evil-local-set-key 'normal (kbd "SPC m") map)
+    (evil-local-set-key 'visual (kbd "SPC m") map)
+    (evil-local-set-key 'motion (kbd "SPC m") map)))
+
+;; 16c. Org seed — dates, refile, insert (template + link only),
+;; + babel execute (inline src_lang{} + #+BEGIN_SRC).
+;; Mirrors layers/+emacs/org/packages.el:346-360, trimmed to
+;; execute/navigate subset (no tangle/sessions/lob).
+(nano/declare-major-prefix 'org-mode "d" "dates")
+(nano/declare-major-prefix 'org-mode "s" "subtree")
+(nano/declare-major-prefix 'org-mode "i" "insert")
+(nano/declare-major-prefix 'org-mode "b" "babel")
+(nano/set-leader-keys-for-major-mode 'org-mode
+  "dd" 'org-deadline
+  "ds" 'org-schedule
+  "dt" 'org-time-stamp
+  "dT" 'org-time-stamp-inactive
+  "sr" 'org-refile
+  "ib" 'org-insert-structure-template ; #+begin_quote etc.
+  "il" 'org-insert-link               ; URLs/links
+  "be" 'org-babel-execute-maybe       ; inline + block Dwim
+  "bc" 'org-ctrl-c-ctrl-c             ; native Dwim alias
+  "bn" 'org-babel-next-src-block
+  "bp" 'org-babel-previous-src-block
+  "bv" 'org-babel-expand-src-block
+  "bo" 'org-babel-open-src-block-result
+  "bs" 'org-babel-execute-subtree
+  "bb" 'org-babel-execute-buffer)
+(which-key-add-keymap-based-replacements
+  (nano/major-mode-leader-map 'org-mode)
+  "dd" "deadline" "ds" "schedule"
+  "dt" "timestamp" "dT" "inactive timestamp"
+  "sr" "refile"
+  "ib" "structure template" "il" "insert link"
+  "be" "execute (inline/block)" "bc" "C-c C-c"
+  "bn" "next src" "bp" "prev src"
+  "bv" "expand src" "bo" "open result"
+  "bs" "execute subtree" "bb" "execute buffer")
+
+(defun nano/org-setup-major-leader ()
+  "Activate curated `,' / `SPC m' map in org buffers."
+  (nano/activate-major-leader-locally 'org-mode))
+(add-hook 'org-mode-hook #'nano/org-setup-major-leader)
+(put 'upcase-region 'disabled nil)
+
+
+;; ---------------------------------------------------------------------
+;; §17  Jump  (avy, SPC j, lazy)
+;; ---------------------------------------------------------------------
+;; Spacemacs `SPC j' parity, minimal pair only.
+;; `avy' already vendored via link-hint (§15), so this reuses the
+;; clone — no network fetch.  No `require': straight autoloads cover
+;; both commands, zero startup cost.
+;; j j = `avy-goto-char-timer' (type, pause jumps — Spacemacs jj default).
+(straight-use-package 'avy)
+(setq avy-background t
+      avy-all-windows 'all-frames)
+
+(define-key spacemacs-leader-map (kbd "j j") 'avy-goto-char-timer)
+(define-key spacemacs-leader-map (kbd "j l") 'avy-goto-line)
+(which-key-add-key-based-replacements
+  "SPC j j" "jump to character"
+  "SPC j l" "jump to line")
+
+
+;; ---------------------------------------------------------------------
+;; §18  Org  (autolist, links, tags, todo flow, babel)
+;; ---------------------------------------------------------------------
+;; Built-in org 9.7 + org-autolist + built-in ob-* only.  Zero startup cost: no
+;; `require 'org'; everything lazy via hook / with-eval-after-load.
+
+;; 18a. RET auto-item, all lists (-, +, *, 1., - [ ]).
+;;      Empty item + RET exits list.  Evil insert RET inherits map.
+(straight-use-package 'org-autolist)
+(add-hook 'org-mode-hook #'org-autolist-mode)
+
+;; 18b. Link open — must be set BEFORE org loads (see its docstring).
+(setq org-mouse-1-follows-link t) ; mouse-1 click follows [[url][desc]]
+
+(with-eval-after-load 'org
+  ;; RET on link opens it (else autolist continues); http(s) goes
+  ;; to external browser via `browse-url'.
+  (setq org-return-follows-link t)
+  ;; Tags tight after headline: 0 = single space, no far-right pad.
+  ;; nil stops realign on tag/todo edit.  Old files stay padded
+  ;; until retag / `M-x org-align-tags'.
+  (setq org-tags-column 0
+        org-auto-align-tags nil)
+  ;; TODO -> NEXT -> DONE.  `org-log-done' inserts CLOSED timestamp
+  ;; on DONE, no note prompt.  Cycle via `C-c C-t' / `S-<left/right>' / `, t'.
+  (setq org-todo-keywords '((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d)"))
+        org-log-done 'time)
+  ;; Babel: inline src_lang{} + #+BEGIN_SRC.  Built-in ob-* only,
+  ;; lazy here so zero startup cost.  Confirm stays t (prompt per
+  ;; execute, safe).  Shell/python need system binaries.
+  (org-babel-do-load-languages 'org-babel-load-languages
+                               '((emacs-lisp . t) (shell . t) (python . t)))
+  (setq org-confirm-babel-evaluate t
+        org-src-tab-acts-natively t
+        org-src-preserve-indentation t
+        org-edit-src-content-indentation 0))
+
+;; 18c. Curated leader additions (map created in §16c, hook already active).
+(nano/set-leader-keys-for-major-mode 'org-mode
+  "t" 'org-todo           ; cycle TODO->NEXT->DONE
+  "o" 'org-open-at-point) ; explicit open, fallback when RET shadowed
+(which-key-add-keymap-based-replacements
+  (nano/major-mode-leader-map 'org-mode)
+  "t" "todo cycle" "o" "open link")
