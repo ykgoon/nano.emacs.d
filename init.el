@@ -15,7 +15,7 @@
 ;;   §3  Vim emulation  (evil + which-key)
 ;;   §4  SPC leader definition  (native, no general.el)
 ;;   §5  Leader keybindings  (file / buffer / window / quit / search)
-;;   §6  Window management  (winum, header-line number, double/triple columns)
+;;   §6  Window management  (winum, header-line, double/triple columns, uniform widths)
 ;;   §7  Theme toggle + persistence  (SPC T n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
 ;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
@@ -107,11 +107,34 @@
       nano-font-size 12)
 
 ;; 2b. Theme — rougier/nano-emacs via straight.  Vendored clone at
-;;     straight/repos/nano-emacs/.  Edit vendored code → M-x straight-rebuild-package.
+;;     straight/repos/nano-emacs/.  Do NOT edit vendored code (lost on
+;;     `straight-pull-all'); override in init.el (§2b2, §6b, §7b2) instead.
 (straight-use-package
  '(nano :type git :host github :repo "rougier/nano-emacs"))
 
 (require 'nano)
+
+;; 2b2. Upstream modernization — replaces vendored nano-defaults.el edits.
+;;      `default-major-mode' obsolete since 23, `defadvice' since 30.1,
+;;      bare `(temp-buffer-resize-mode)' toggles instead of enabling.
+;;      `nano-command.el' point-at-bol/eol aliases still functional and
+;;      warnings suppressed in §1 — no override needed, dropped.
+(with-eval-after-load 'nano-defaults
+  (setq-default major-mode 'text-mode)
+  (when (fboundp 'temp-buffer-resize-mode)
+    (temp-buffer-resize-mode 1))
+  ;; Replace legacy defadvice with modern advice-add.
+  (when (fboundp 'ad-remove-advice)
+    (ignore-errors
+      (ad-remove-advice 'term-sentinel 'around 'my-advice-term-sentinel)
+      (ad-activate 'term-sentinel)))
+  (defun nano--term-sentinel-around (orig proc msg)
+    (funcall orig proc msg)
+    (when (memq (process-status proc) '(signal exit))
+      (let ((buffer (process-buffer proc)))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer)))))
+  (advice-add 'term-sentinel :around #'nano--term-sentinel-around))
 
 ;; 2c. Line wrapping — visual-line wraps long lines without hard newline.
 (global-visual-line-mode 1)
@@ -325,17 +348,28 @@ Fresh buffer defaults to `lisp-interaction-mode'."
 ;; SPC w 2 / SPC w 3 (double/triple columns) defined in §6c — kept with its implementation.
 
 ;; 5d. Quit / session  (SPC q)
-;; SPC q r restores file buffers via built-in desktop-save-mode
-;; (var/desktop/).  Tab-bar workspaces (§9) are NOT restored —
-;; desktop persists buffers only.  Restart keeps --init-directory
+;; SPC q q / SPC q r save + restore file buffers, window splits (§6),
+;; tab-bar workspaces (§9), and all frames via built-in desktop-save-mode
+;; frameset (var/desktop/).  Quit-only save (`desktop-auto-save-timeout'
+;; nil); kill-hook re-save also silent.  Restart keeps --init-directory
 ;; since builtin `restart-emacs' re-execs same argv.
+;; Tab-bar MUST be on BEFORE `desktop-save-mode' reads, else frameset
+;; restores without tabs (workspaces lost).
+(require 'tab-bar)
+(tab-bar-mode 1)
+;; NOTE: plain setq on `tab-bar-show' does NOT take effect — custom :set
+;; refreshes `tab-bar-lines'.  Full tab-bar config lives in §9; this
+;; early hide keeps first frame clean before §9 re-asserts.
+(customize-set-variable 'tab-bar-show nil)
 (require 'desktop)
 (setq desktop-dirname (locate-user-emacs-file "var/desktop")
       desktop-path (list desktop-dirname)
       desktop-save t
       desktop-load-locked-desktop nil
       desktop-restore-eager 10
-      desktop-restore-frames nil
+      desktop-restore-frames t
+      desktop-restore-reuses-frames t
+      desktop-restore-in-current-display t
       desktop-auto-save-timeout nil)
 (make-directory desktop-dirname t)
 (desktop-save-mode 1)
@@ -379,9 +413,18 @@ Bound to SPC q q."
 (define-key spacemacs-leader-map (kbd "s s") 'isearch-forward)
 ;; SPC h group label declared in §4; add help bindings here as needed.
 
+;; 5f. Comment  (SPC c l)
+;; Built-in newcomment.el autoload, zero startup cost.  `comment-line'
+;; DWIM: active region (incl. evil visual) toggles each line, else
+;; current line.  Works in any prog/text mode via `comment-start'.
+(define-key spacemacs-leader-map (kbd "c l") 'comment-line)
+(which-key-add-key-based-replacements
+  "SPC c" "comment"
+  "SPC c l" "comment lines")
+
 
 ;; ---------------------------------------------------------------------
-;; §6  Window management  (winum, header-line, double/triple columns)
+;; §6  Window management  (winum, header-line, double/triple columns, uniform widths)
 ;; ---------------------------------------------------------------------
 
 ;; 6a. Window numbers — winum (deb0ch/emacs-winum)
@@ -491,7 +534,20 @@ which duplicated the filename in the modeline."
               (propertize (make-string available-width ?\ )
                           'face 'nano-face-header-default)
               (propertize right 'face `(:inherit nano-face-header-default
-                                                 :foreground ,nano-color-faded))))))
+                                                 :foreground ,nano-color-faded)))))
+  ;; Bottom bar — replaces vendored nano-modeline.el installer edit.
+  ;; Upstream `nano-modeline' installs on header-line (top) and
+  ;; `nano-modeline-update-windows' hides mode-line per window.
+  ;; Copy-over (not frozen list) so upstream cond additions survive.
+  ;; Idempotent: skips when header default already moved (reload safe).
+  (remove-hook 'window-configuration-change-hook #'nano-modeline-update-windows)
+  (dolist (w (window-list nil t))
+    (set-window-parameter w 'mode-line-format nil))
+  (let ((hdr (default-value 'header-line-format)))
+    (when hdr
+      (setq-default mode-line-format hdr)
+      (setq-default header-line-format nil)))
+  (force-mode-line-update t))
 
 ;; 6c. Double / triple vertical split — SPC w 2 / SPC w 3
 ;;     (basic SPC w splits live in §5c — this extends that group).
@@ -517,7 +573,7 @@ which duplicated the filename in the modeline."
     (if w2
         (progn
           (set-window-buffer w2 (or (nth 1 bufs) "*scratch*"))
-          (balance-windows))
+          (nano/balance-window-widths))
       (message "SPC w 2: frame too narrow to split"))))
 
 (defun nano/window-split-triple-columns (&optional purge)
@@ -533,7 +589,7 @@ which duplicated the filename in the modeline."
         (progn
           (set-window-buffer w2 (or (nth 1 bufs) "*scratch*"))
           (set-window-buffer w3 (or (nth 2 bufs) "*scratch*"))
-          (balance-windows))
+          (nano/balance-window-widths))
       (message "SPC w 3: frame too narrow to split"))))
 
 (define-key spacemacs-leader-map (kbd "w 2") 'nano/window-split-double-columns)
@@ -566,6 +622,73 @@ which duplicated the filename in the modeline."
 
 (which-key-add-key-based-replacements "SPC w r" "rotate forward"
   "SPC w R" "rotate backward")
+
+;; 6e. Uniform column widths — SPC w =
+;;     `window-combination-resize t' makes splits/deletes take space
+;;     proportionally from all siblings (default nil steals from one
+;;     neighbor only, skewing columns). Exact equalization after each
+;;     split/delete via `nano/balance-window-widths' — widths only,
+;;     since `balance-windows' would also reset intentional height tweaks.
+;;     Geometry check (equal tops = side-by-side) skips stacked splits
+;;     and full-width bottom popups (which-key/LV). Advice covers ALL
+;;     split paths (SPC w / s, evil, mouse). Manual drag survives until
+;;     next split — no config-change hook snap.
+(setq window-combination-resize t)
+
+(defun nano/window-siblings (first)
+  "List FIRST window plus following siblings via `window-next-sibling'."
+  (let ((wins (list first)) (w (window-next-sibling first)))
+    (while w (push w wins) (setq w (window-next-sibling w)))
+    (nreverse wins)))
+
+(defun nano/equalize-widths (windows)
+  "Resize side-by-side WINDOWS to equal widths, left to right.
+Total preserved; +1 remainder goes leftmost. Heights untouched.
+`adjust-window-trailing-edge' moves one edge only (unlike
+`window-resize' proportional). Min-width/fixed errors ignored."
+  (let* ((n (length windows))
+         (total (apply #'+ (mapcar #'window-total-width windows)))
+         (base (/ total n))
+         (rem (% total n))
+         (i 0))
+    (dolist (w (butlast windows))
+      (let* ((target (+ base (if (< i rem) 1 0)))
+             (delta (- target (window-total-width w))))
+        (unless (zerop delta)
+          (ignore-errors (adjust-window-trailing-edge w delta t))))
+      (setq i (1+ i)))))
+
+(defun nano/balance-window-widths-1 (win)
+  "Recursive worker: equalize every side-by-side level under WIN."
+  (when (window-child win)
+    (let* ((siblings (nano/window-siblings (window-child win)))
+           (tops (mapcar (lambda (w) (nth 1 (window-edges w))) siblings))
+           (side-by-side-p (and (> (length siblings) 1)
+                                (apply #'= tops))))
+      (when side-by-side-p
+        (nano/equalize-widths siblings))
+      (dolist (w siblings)
+        (nano/balance-window-widths-1 w)))))
+
+(defun nano/balance-window-widths (&optional frame)
+  "Equalize widths of all side-by-side columns on FRAME. Heights untouched.
+Bound to SPC w =. Runs automatically after splits/deletes."
+  (interactive)
+  (let ((root (frame-root-window (or frame (selected-frame)))))
+    (ignore-errors (nano/balance-window-widths-1 root))))
+
+(defun nano/balance-widths-after-split (&rest _)
+  "Advice target: rebalance widths after split/delete. Skips minibuffer."
+  (unless (window-minibuffer-p (selected-window))
+    (nano/balance-window-widths)))
+
+(advice-add 'split-window-right :after #'nano/balance-widths-after-split)
+(advice-add 'split-window-below :after #'nano/balance-widths-after-split)
+(advice-add 'delete-window :after #'nano/balance-widths-after-split)
+(advice-add 'delete-other-windows :after #'nano/balance-widths-after-split)
+
+(define-key spacemacs-leader-map (kbd "w =") 'nano/balance-window-widths)
+(which-key-add-key-based-replacements "SPC w =" "balance widths")
 
 
 ;; ---------------------------------------------------------------------
@@ -616,11 +739,14 @@ which duplicated the filename in the modeline."
 
 (nano/theme-restore)
 
-;; 7b. Trailing whitespace — true red in ALL buffers, Spacemacs red parity.
+;; 7b. Trailing whitespace — true red in file buffers, Spacemacs red parity.
 ;;     Mechanism is NOT theme-only: `show-trailing-whitespace' enables the
 ;;     highlight, `trailing-whitespace' face colors it.  Nano maps that face
 ;;     to `nano-face-subtle' (nano-theme.el:124), so override to true red here.
 ;;     `nano-refresh-theme' re-applies nano faces, so re-assert via advice.
+;;     Exempt: read-only + special-mode buffers (eww derives from
+;;     special-mode, plus help/magit/...) never highlight — their trailing
+;;     spaces are renderer output, not user dirt.
 (setq-default show-trailing-whitespace t)
 
 (defun nano/apply-trailing-whitespace-face ()
@@ -632,13 +758,46 @@ which duplicated the filename in the modeline."
 (when (fboundp 'nano-refresh-theme)
   (advice-add 'nano-refresh-theme :after #'nano/apply-trailing-whitespace-face))
 
+;; 7b2. Mode-line box — replaces vendored nano-theme.el edit.
+;;      Upstream sets mode-line :height 0.1 + :box nil (hairline hidden).
+;;      Restore readable 1px box in default bg. Re-applied after refresh.
+(defun nano/apply-mode-line-box ()
+  "Restore visible 1px mode-line box.  Re-applied after theme refresh."
+  (let ((bg (face-background 'nano-face-default)))
+    (set-face-attribute 'mode-line nil :height 1.0
+                        :box `(:line-width 1 :color ,bg :style nil))
+    (set-face-attribute 'mode-line-inactive nil :height 1.0
+                        :box `(:line-width 1 :color ,bg :style nil))))
+
+(nano/apply-mode-line-box)
+(when (fboundp 'nano-refresh-theme)
+  (advice-add 'nano-refresh-theme :after #'nano/apply-mode-line-box))
+
+(defun nano/trailing-whitespace-inhibit-p ()
+  "Non-nil when current buffer should skip trailing-whitespace highlight."
+  (or buffer-read-only
+      (derived-mode-p 'special-mode)))
+
+(defun nano/disable-trailing-whitespace-maybe ()
+  "Set `show-trailing-whitespace' nil in read-only / special buffers."
+  (when (nano/trailing-whitespace-inhibit-p)
+    (setq show-trailing-whitespace nil)))
+
+(add-hook 'after-change-major-mode-hook #'nano/disable-trailing-whitespace-maybe)
+(add-hook 'read-only-mode-hook #'nano/disable-trailing-whitespace-maybe)
+(dolist (b (buffer-list))
+  (with-current-buffer b (nano/disable-trailing-whitespace-maybe)))
+
 (defun nano/toggle-trailing-whitespace ()
-  "Toggle trailing-whitespace highlight in all buffers.  Bound to SPC t w."
+  "Toggle trailing-whitespace highlight in editable buffers.  Bound to SPC t w.
+Exempt buffers (read-only / special-mode) stay off when enabling."
   (interactive)
   (let ((v (not (default-value 'show-trailing-whitespace))))
     (setq-default show-trailing-whitespace v)
     (dolist (b (buffer-list))
-      (with-current-buffer b (setq show-trailing-whitespace v)))
+      (with-current-buffer b
+        (setq show-trailing-whitespace
+              (and v (not (nano/trailing-whitespace-inhibit-p))))))
     (message "trailing whitespace: %s" (if v "on" "off"))))
 
 (define-key spacemacs-leader-map (kbd "t n") 'nano/toggle-theme)
@@ -685,7 +844,7 @@ which duplicated the filename in the modeline."
 ;; eyebrowse.  Top tab bar stays hidden (`tab-bar-show' nil reclaims the
 ;; row); the name shows far-right in the bottom modeline (§6b), Spacemacs-style.
 (require 'tab-bar)
-(tab-bar-mode 1)
+(tab-bar-mode 1) ; already on via §5d (before desktop read); idempotent here.
 ;; NOTE: plain setq on `tab-bar-show' does NOT take effect — it has a
 ;; custom :set that refreshes `tab-bar-lines' on all frames.  Must use
 ;; `customize-set-variable' or the top bar stays visible.
@@ -700,11 +859,22 @@ which duplicated the filename in the modeline."
 ;; modeline shows a workspace, not a second copy of the filename.
 ;; Deferred to window-setup: the first tab only settles once the initial
 ;; frame exists (at init-load time the tab list may still be empty).
-;; Fresh launch always starts with one tab; no tab persistence configured.
+;; Guard: skip when a session was restored (multi-tab/multi-frame, or
+;; any explicitly named tab) so desktop frameset names survive.
 (add-hook 'window-setup-hook
           (lambda ()
             (when (and (bound-and-true-p tab-bar-mode)
-                       (= (length (tab-bar-tabs)) 1))
+                       (not (seq-some (lambda (f)
+                                        (> (length (frame-parameter f 'tabs)) 1))
+                                      (frame-list)))
+                       (seq-every-p (lambda (f)
+                                      (let ((tabs (frame-parameter f 'tabs)))
+                                        (or (null tabs)
+                                            (seq-every-p
+                                             (lambda (tab)
+                                               (not (cdr (assq 'explicit-name tab))))
+                                             tabs))))
+                                    (frame-list)))
               (ignore-errors (tab-bar-rename-tab "main")))))
 
 (defun nano/workspace-new-tab (arg)
@@ -1383,6 +1553,30 @@ Skips subdirs (e.g. roam/) so agenda scans fewer files."
     (evil-define-key 'normal org-mode-map (kbd "<return>") #'nano/org-ret-dwim)
     (evil-define-key 'motion org-mode-map (kbd "RET") #'nano/org-ret-dwim)
     (evil-define-key 'motion org-mode-map (kbd "<return>") #'nano/org-ret-dwim)))
+
+;; 18b1b. Fold to cursor level — evil `zs' DWIM in org only.
+;; `evil-motion-state-map zs' is `evil-scroll-start-column' globally;
+;; shadow it buffer-locally via `org-mode-map' so other modes keep it.
+;; Point anywhere inside a subtree folds whole buffer to that heading's
+;; level (cursor at L2 → L3+ hidden).  `outline-hide-sublevels' (org
+;; derives from outline) defaults to current level when called without
+;; arg; pass LVL explicitly so body-text point (via `org-back-to-heading')
+;; and echo message stay exact.  Errors when buffer has no heading.
+(defun nano/org-fold-to-cursor-level ()
+  "Hide everything below current heading's level, whole buffer.  Bound to `zs' in org."
+  (interactive)
+  (require 'outline)
+  (let ((lvl (save-excursion
+               (org-back-to-heading t)
+               (org-current-level))))
+    (unless lvl (user-error "No heading at point"))
+    (outline-hide-sublevels lvl)
+    (message "fold to level %d" lvl)))
+
+(with-eval-after-load 'org
+  (with-eval-after-load 'evil
+    (evil-define-key 'normal org-mode-map "zs" #'nano/org-fold-to-cursor-level)
+    (evil-define-key 'motion org-mode-map "zs" #'nano/org-fold-to-cursor-level)))
 
 ;; 18b2. Single-click mouse — belt-and-braces for §18pre: force
 ;; `mouse-1-click-follows-link' t buffer-locally (single short click
