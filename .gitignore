@@ -9,6 +9,9 @@
 \#*\#
 .\#*
 *.elc
+.org-id-locations
 
 # Local state (theme choice, etc.)
 /var/
+/url/
+/elfeed/

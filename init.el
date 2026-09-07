@@ -30,7 +30,9 @@
 ;;   §18  Org  (autolist, links, tags, todo flow, babel, agenda, random)
 ;;   §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
 ;;   §20  Markdown  (markdown-mode + gfm, SPC m / ,, lazy)
-;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC a o, lazy)
+;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC o, lazy)
+;;   §22  Update  (float latest, SPC f e U pull+rebuild)
+;;   §23  Web  (built-in eww + elfeed, SPC a w, lazy)
 ;; =====================================================================
 
 
@@ -44,12 +46,13 @@
 ;; Pin `org' as built-in BEFORE any org-dependent package (§18a,
 ;; §18d, §21) so straight never clones its 112M repo on fresh
 ;; bootstrap to satisfy a Package-Requires header — built-in 9.7 used.
-(straight-use-package '(org :type built-in))
+;; NOTE: pin MUST stay AFTER bootstrap load below — `straight-use-package'
+;; is undefined until bootstrap.el loads, else boot dies with void-function.
 (defvar bootstrap-version)
 (let ((bootstrap-file
-        (expand-file-name "straight/repos/straight.el/bootstrap.el"
-                          user-emacs-directory))
-       (bootstrap-version 6))
+       (expand-file-name "straight/repos/straight.el/bootstrap.el"
+                         user-emacs-directory))
+      (bootstrap-version 6))
   (unless (file-exists-p bootstrap-file)
     (with-current-buffer
         (url-retrieve-synchronously
@@ -58,6 +61,7 @@
       (goto-char (point-max))
       (eval-print-last-sexp)))
   (load bootstrap-file nil 'nomessage))
+(straight-use-package '(org :type built-in))
 
 
 ;; ---------------------------------------------------------------------
@@ -122,19 +126,19 @@
       (cons '(menu-bar-lines . 0)
             (cons '(tool-bar-lines . 0)
                   (assq-delete-all 'tool-bar-lines
-                    (assq-delete-all 'menu-bar-lines default-frame-alist)))))
+                                   (assq-delete-all 'menu-bar-lines default-frame-alist)))))
 (add-hook 'after-make-frame-functions
-           (lambda (_f) (when (fboundp 'menu-bar-mode) (menu-bar-mode -1))
-             (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))))
+          (lambda (_f) (when (fboundp 'menu-bar-mode) (menu-bar-mode -1))
+            (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))))
 
 ;; Maximized desktop startup — re-assert after nano-layout.el:22 overwrote alists.
 ;; early-init.el sets same before first frame (no flicker); this ensures persistence.
-(add-to-list 'initial-frame-alist '(fullscreen . maximized))
-(add-to-list 'default-frame-alist '(fullscreen . maximized))
+;; (add-to-list 'initial-frame-alist '(fullscreen . maximized))
+;; (add-to-list 'default-frame-alist '(fullscreen . maximized))
 ;; Fallback: init.el runs after initial frame creation, so explicitly maximize
 ;; the live frame (tty/batch ignored, graphic only).
-(add-hook 'window-setup-hook (lambda () (when (display-graphic-p)
-                                     (set-frame-parameter nil 'fullscreen 'maximized))))
+;; (add-hook 'window-setup-hook (lambda () (when (display-graphic-p)
+;;                                         (set-frame-parameter nil 'fullscreen 'maximized))))
 
 
 ;; ---------------------------------------------------------------------
@@ -192,7 +196,8 @@
   "SPC t" "toggle"
   "SPC i" "insert"
   "SPC a" "apps"
-  "SPC a o" "roam"
+  "SPC o" "org-mode"
+  "SPC a w" "web"
   "SPC z" "zoom"
   "SPC z x" "text")
 
@@ -211,11 +216,68 @@
 (define-key spacemacs-leader-map (kbd "f s") 'save-buffer)
 (define-key spacemacs-leader-map (kbd "f S") 'save-some-buffers)
 (define-key spacemacs-leader-map (kbd "f r") 'recentf-open-files)
+(define-key spacemacs-leader-map (kbd "f D") 'nano/delete-current-buffer-file)
+(define-key spacemacs-leader-map (kbd "f R") 'nano/rename-current-buffer-file)
+(which-key-add-key-based-replacements
+  "SPC f D" "delete file"
+  "SPC f R" "rename file")
+
+(defun nano/delete-current-buffer-file (&optional arg)
+  "Delete file visited by current buffer, then kill buffer.  Bound to SPC f D.
+Confirms unless prefix ARG.  Errors when buffer visits no file."
+  (interactive "P")
+  (let ((filename (buffer-file-name))
+        (buffer (current-buffer))
+        (name (buffer-name)))
+    (unless (and filename (file-exists-p filename))
+      (user-error "Buffer %s visits no file" name))
+    (if (or arg (yes-or-no-p (format "Delete file '%s'? " name)))
+        (progn
+          (delete-file filename t)
+          (kill-buffer buffer)
+          (when (fboundp 'recentf-remove-if-non-kept)
+            (recentf-remove-if-non-kept filename))
+          (message "File deleted: '%s'" filename))
+      (message "Canceled: file deletion"))))
+
+(defun nano/rename-current-buffer-file (&optional arg)
+  "Rename file visited by current buffer.  Bound to SPC f R.
+Without prefix ARG, prompt starts in current dir; with ARG, full old path.
+Creates parent dirs after confirm.  Errors when buffer visits no file."
+  (interactive "P")
+  (let ((old (buffer-file-name)))
+    (unless (and old (file-exists-p old))
+      (user-error "Buffer %s visits no file" (buffer-name)))
+    (let* ((old-dir (file-name-directory old))
+           (old-short (file-name-nondirectory old))
+           (path (read-file-name "New name: " (if arg old old-dir)))
+           (new (if (string= (file-name-nondirectory path) "")
+                    (concat path old-short)
+                  path)))
+      (when (get-buffer new)
+        (user-error "A buffer named '%s' already exists" new))
+      (when (string-equal new old)
+        (user-error "Same new and old name"))
+      (let ((new-dir (file-name-directory new)))
+        (when (and new-dir (not (file-exists-p new-dir)))
+          (unless (yes-or-no-p (format "Create directory '%s'? " new-dir))
+            (user-error "Canceled: rename"))
+          (make-directory new-dir t)))
+      (rename-file old new 1)
+      (set-visited-file-name new t)
+      (set-buffer-modified-p nil)
+      (when (fboundp 'recentf-add-file)
+        (recentf-add-file new)
+        (when (fboundp 'recentf-remove-if-non-kept)
+          (recentf-remove-if-non-kept old)))
+      (message "Renamed '%s' to '%s'" old-short (file-name-nondirectory new)))))
 
 ;; 5b. Buffer  (SPC b)
 (define-key spacemacs-leader-map (kbd "TAB") 'mode-line-other-buffer)
 (define-key spacemacs-leader-map (kbd "b b") 'switch-to-buffer)
 (define-key spacemacs-leader-map (kbd "b d") 'kill-current-buffer)
+(define-key spacemacs-leader-map (kbd "b D") 'kill-matching-buffers)
+(define-key spacemacs-leader-map (kbd "b e") 'erase-buffer)
 (define-key spacemacs-leader-map (kbd "b n") 'next-buffer)
 (define-key spacemacs-leader-map (kbd "b p") 'previous-buffer)
 (define-key spacemacs-leader-map (kbd "b R") 'revert-buffer)
@@ -223,7 +285,9 @@
 (define-key spacemacs-leader-map (kbd "b Y") 'nano/copy-whole-buffer-to-clipboard)
 (which-key-add-key-based-replacements
   "SPC TAB" "last buffer"
+  "SPC b D" "kill buffers by pattern"
   "SPC b R" "revert buffer"
+  "SPC b e" "erase buffer"
   "SPC b s" "scratch buffer"
   "SPC b Y" "copy buffer")
 
@@ -271,20 +335,45 @@ Fresh buffer defaults to `lisp-interaction-mode'."
       desktop-save t
       desktop-load-locked-desktop nil
       desktop-restore-eager 10
-      desktop-restore-frames nil)
+      desktop-restore-frames nil
+      desktop-auto-save-timeout nil)
 (make-directory desktop-dirname t)
 (desktop-save-mode 1)
+
+(defun nano/desktop-ensure-dir ()
+  "Return desktop dir, creating it.  Never nil — avoids `Directory:' prompt.
+`desktop-save-in-desktop-dir' falls back to interactive `desktop-save'
+when `desktop-dirname' is nil; explicit dir here keeps quit silent."
+  (let ((dir (or desktop-dirname (locate-user-emacs-file "var/desktop"))))
+    (make-directory dir t)
+    (setq desktop-dirname dir)
+    dir))
+
+(defun nano/desktop-save-silently ()
+  "Non-interactive desktop save.  Never prompts for directory."
+  (let ((desktop-save t))
+    (desktop-save (nano/desktop-ensure-dir))))
 
 (defun nano/restart-emacs-restore ()
   "Save desktop session, then restart.  Bound to SPC q r."
   (interactive)
-  (desktop-save-in-desktop-dir)
-  (restart-emacs))
+  (nano/desktop-save-silently)
+  (let ((desktop-save t)) ; kill-hook re-save also silent, no second prompt
+    (restart-emacs)))
 
-(define-key spacemacs-leader-map (kbd "q q") 'save-buffers-kill-terminal)
+(defun nano/quit-save-silently ()
+  "Save desktop silently, then quit (still prompts for unsaved files).
+Bound to SPC q q."
+  (interactive)
+  (nano/desktop-save-silently)
+  (let ((desktop-save t)) ; kill-hook re-save also silent
+    (save-buffers-kill-terminal)))
+
+(define-key spacemacs-leader-map (kbd "q q") 'nano/quit-save-silently)
 (define-key spacemacs-leader-map (kbd "q Q") 'kill-emacs)
 (define-key spacemacs-leader-map (kbd "q r") 'nano/restart-emacs-restore)
-(which-key-add-key-based-replacements "SPC q r" "restart + restore")
+(which-key-add-key-based-replacements "SPC q q" "quit"
+  "SPC q r" "restart")
 
 ;; 5e. Search & help  (SPC s / SPC h)
 (define-key spacemacs-leader-map (kbd "s s") 'isearch-forward)
@@ -402,7 +491,7 @@ which duplicated the filename in the modeline."
               (propertize (make-string available-width ?\ )
                           'face 'nano-face-header-default)
               (propertize right 'face `(:inherit nano-face-header-default
-                                         :foreground ,nano-color-faded))))))
+                                                 :foreground ,nano-color-faded))))))
 
 ;; 6c. Double / triple vertical split — SPC w 2 / SPC w 3
 ;;     (basic SPC w splits live in §5c — this extends that group).
@@ -450,7 +539,7 @@ which duplicated the filename in the modeline."
 (define-key spacemacs-leader-map (kbd "w 2") 'nano/window-split-double-columns)
 (define-key spacemacs-leader-map (kbd "w 3") 'nano/window-split-triple-columns)
 (which-key-add-key-based-replacements "SPC w 2" "double columns"
-                                      "SPC w 3" "triple columns")
+  "SPC w 3" "triple columns")
 
 ;; 6d. Window rotation — SPC w r / SPC w R (Spacemacs parity, rotate all)
 ;;     SPC w r → forward (right), SPC w R → backward (left).
@@ -476,7 +565,7 @@ which duplicated the filename in the modeline."
   (nano/window-rotate-forward (* -1 (or count 1))))
 
 (which-key-add-key-based-replacements "SPC w r" "rotate forward"
-                                      "SPC w R" "rotate backward")
+  "SPC w R" "rotate backward")
 
 
 ;; ---------------------------------------------------------------------
@@ -555,7 +644,7 @@ which duplicated the filename in the modeline."
 (define-key spacemacs-leader-map (kbd "t n") 'nano/toggle-theme)
 (define-key spacemacs-leader-map (kbd "t w") 'nano/toggle-trailing-whitespace)
 (which-key-add-key-based-replacements "SPC t n" "toggle theme"
-                                      "SPC t w" "trailing whitespace")
+  "SPC t w" "trailing whitespace")
 
 
 ;; ---------------------------------------------------------------------
@@ -739,9 +828,10 @@ With prefix ARG, pass through to `tab-bar-new-tab'."
 ;; and lightest on this machine: single static binary, respects
 ;; .gitignore, skips hidden/binary, parallel.  `fd'/`ag' absent,
 ;; `grep'/`find' slower, `fzf' needs a source list anyway.
-;; Zero-dep: built-in project.el + xref + fido-vertical (§8) only.
-;; SPC s s (isearch) stays in §5e; this section adds s f / s g.
+;; Zero-dep: built-in project.el + xref + grep + fido-vertical (§8) only.
+;; SPC s s (isearch) stays in §5e; this section adds s f / s g / s d.
 (require 'xref)
+(require 'grep)
 
 ;; Use rg as xref backend when present; else stay on grep.
 (when (executable-find "rg")
@@ -794,11 +884,31 @@ Falls back to grep backend + one-time install hint when rg missing."
   (nano/search-ensure-rg)
   (call-interactively #'project-find-regexp))
 
+(defun nano/search-grep-in-dir (regexp dir)
+  "Grep REGEXP in DIR with rg, results in `*grep*'.  Bound to SPC s d.
+Prompts DIR first (default `nano/search-root'), then REGEXP
+\(default symbol at point).  Uses `rg --vimgrep' when present and
+DIR is local — respects .gitignore, skips hidden/binary.  Else
+falls back to built-in `rgrep' + one-time install hint."
+  (interactive
+   (let ((dir (read-directory-name "Grep in dir: " (nano/search-root) nil t)))
+     (list (read-regexp "Search for: " (thing-at-point 'symbol)) dir)))
+  (if (and (nano/search-ensure-rg)
+           (not (file-remote-p dir)))
+      (let ((cmd (mapconcat #'shell-quote-argument
+                            (list "rg" "--vimgrep" "--smart-case" "--hidden"
+                                  "--glob" "!.git/*" "-e" regexp dir)
+                            " ")))
+        (grep cmd))
+    (rgrep regexp "*" dir)))
+
 (define-key spacemacs-leader-map (kbd "s f") 'nano/rg-find-file)
 (define-key spacemacs-leader-map (kbd "s g") 'nano/search-grep)
+(define-key spacemacs-leader-map (kbd "s d") 'nano/search-grep-in-dir)
 (which-key-add-key-based-replacements
   "SPC s f" "find file (rg)"
-  "SPC s g" "grep project (rg)")
+  "SPC s g" "grep project (rg)"
+  "SPC s d" "grep dir (rg)")
 
 
 ;; ---------------------------------------------------------------------
@@ -1074,7 +1184,7 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 (defun nano/declare-major-prefix (mode prefix label)
   "Label PREFIX (e.g. \"d\") as LABEL in MODE's curated map for which-key."
   (which-key-add-keymap-based-replacements
-   (nano/major-mode-leader-map mode) prefix label))
+    (nano/major-mode-leader-map mode) prefix label))
 
 (defun nano/activate-major-leader-locally (mode)
   "Shadow global `,' / `SPC m' with MODE's curated map in current buffer."
@@ -1097,21 +1207,21 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 (nano/declare-major-prefix 'org-mode "i" "insert")
 (nano/declare-major-prefix 'org-mode "b" "babel")
 (nano/set-leader-keys-for-major-mode 'org-mode
-  "dd" 'org-deadline
-  "ds" 'org-schedule
-  "dt" 'org-time-stamp
-  "dT" 'org-time-stamp-inactive
-  "sr" 'org-refile
-  "ib" 'org-insert-structure-template ; #+begin_quote etc.
-  "il" 'org-insert-link               ; URLs/links
-  "be" 'org-babel-execute-maybe       ; inline + block Dwim
-  "bc" 'org-ctrl-c-ctrl-c             ; native Dwim alias
-  "bn" 'org-babel-next-src-block
-  "bp" 'org-babel-previous-src-block
-  "bv" 'org-babel-expand-src-block
-  "bo" 'org-babel-open-src-block-result
-  "bs" 'org-babel-execute-subtree
-  "bb" 'org-babel-execute-buffer)
+                                     "dd" 'org-deadline
+                                     "ds" 'org-schedule
+                                     "dt" 'org-time-stamp
+                                     "dT" 'org-time-stamp-inactive
+                                     "sr" 'org-refile
+                                     "ib" 'org-insert-structure-template ; #+begin_quote etc.
+                                     "il" 'org-insert-link               ; URLs/links
+                                     "be" 'org-babel-execute-maybe       ; inline + block Dwim
+                                     "bc" 'org-ctrl-c-ctrl-c             ; native Dwim alias
+                                     "bn" 'org-babel-next-src-block
+                                     "bp" 'org-babel-previous-src-block
+                                     "bv" 'org-babel-expand-src-block
+                                     "bo" 'org-babel-open-src-block-result
+                                     "bs" 'org-babel-execute-subtree
+                                     "bb" 'org-babel-execute-buffer)
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'org-mode)
   "dd" "deadline" "ds" "schedule"
@@ -1155,12 +1265,74 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 ;; Built-in org 9.7 + org-autolist + org-randomnote + built-in ob-* only.  Zero startup cost: no
 ;; `require 'org'; everything lazy via hook / with-eval-after-load.
 
+;; 18pre. Link vars — MUST precede first org require (§18a pulls org
+;; via org-autolist).  `org-mouse-1-follows-link' is read at org.el
+;; load time; setting it after load misses (single-click stays 450ms
+;; double-click gate).  `org-return-follows-link' is runtime-checked,
+;; set here too so insert-state RET follows links from first load.
+(setq org-mouse-1-follows-link t
+      org-return-follows-link t)
+
 ;; 18a. RET auto-item, all lists (-, +, *, 1., - [ ]).
 ;;      Empty item + RET exits list.  Evil insert RET inherits map.
+;;      Evil `o' / `O' bypass RET (raw newline), so shadow them
+;;      buffer-locally: list -> new item below/above, empty -> exit,
+;;      else plain evil open.  Ends in insert state like evil.
 (straight-use-package 'org-autolist)
 (add-hook 'org-mode-hook #'org-autolist-mode)
 
-;; 18b. Link open + agenda files — must be set BEFORE org loads.
+(with-eval-after-load 'evil
+  (defun nano/org--empty-item-p ()
+    "Non-nil if current line is an empty org list item."
+    (save-excursion
+      (beginning-of-line)
+      (when (looking-at org-list-full-item-re)
+        (goto-char (match-end 0))
+        (eolp))))
+
+  (defun nano/org--exit-empty-item ()
+    "Exit empty item like autolist RET: outdent, else clear line."
+    (condition-case nil
+        (call-interactively #'org-outdent-item)
+      (error (delete-region (line-beginning-position)
+                            (line-end-position)))))
+
+  (defun nano/org-open-below-item (count)
+    "Evil `o' DWIM in org: continue item below, empty exits, else open."
+    (interactive "p")
+    (cond ((and (org-at-item-p) (nano/org--empty-item-p))
+           (nano/org--exit-empty-item)
+           (evil-insert-state 1))
+          ((org-at-item-p)
+           (end-of-line)
+           (let ((checkbox (org-at-item-checkbox-p)))
+             (dotimes (_ (or count 1))
+               (if checkbox
+                   (org-insert-todo-heading nil)
+                 (org-insert-item)))))
+          (t (evil-open-below count))))
+
+  (defun nano/org-open-above-item (count)
+    "Evil `O' DWIM in org: continue item above, empty exits, else open."
+    (interactive "p")
+    (cond ((and (org-at-item-p) (nano/org--empty-item-p))
+           (nano/org--exit-empty-item)
+           (evil-insert-state 1))
+          ((org-at-item-p)
+           (beginning-of-line)
+           (let ((checkbox (org-at-item-checkbox-p)))
+             (dotimes (_ (or count 1))
+               (if checkbox
+                   (org-insert-todo-heading nil)
+                 (org-insert-item)))))
+          (t (evil-open-above count))))
+
+  (add-hook 'org-mode-hook
+            (lambda ()
+              (evil-local-set-key 'normal "o" #'nano/org-open-below-item)
+              (evil-local-set-key 'normal "O" #'nano/org-open-above-item))))
+
+;; 18b. Link open + agenda files — vars in §18pre (before org load).
 ;;      Machine-specific: gated on dir existence so portable machines
 ;;      without ~/Dropbox/org skip silently (warn once like §12 rg).
 (defvar nano/org-directory (expand-file-name "~/Dropbox/org")
@@ -1177,23 +1349,110 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
       (message "org dir %s missing, agenda/roam scope skipped" nano/org-directory))
     nil))
 
-(setq org-mouse-1-follows-link t) ; mouse-1 click follows [[url][desc]]
+(defun nano/org-agenda-top-level-files ()
+  "Return non-recursive *.org files directly under `nano/org-directory'.
+Skips subdirs (e.g. roam/) so agenda scans fewer files."
+  (when (file-directory-p nano/org-directory)
+    (directory-files nano/org-directory t "\\.org$")))
+
 (when (file-directory-p nano/org-directory)
-  (setq org-agenda-files (list nano/org-directory))) ; agenda scope = Dropbox org dir
+  (setq org-agenda-files (nano/org-agenda-top-level-files))) ; agenda scope = top-level org dir only
+
+;; 18b1. Evil RET DWIM — `evil-motion-state-map RET -> evil-ret' shadows
+;; `org-mode-map RET -> org-return' in normal/motion, so RET on a link
+;; just moved line (no open).  Plain `o' is `evil-open-below' by design
+;; (see §18a DWIM); link open is `RET'/`, o'/`C-c C-o'.  Off-link RET
+;; keeps `evil-ret' (next-line), on-link calls `org-open-at-point'
+;; (covers `id:' roam + `https:' via `browse-url-default-browser'/xdg-open).
+(defun nano/org-at-link-p ()
+  "Non-nil when point is on an org link (incl. inside description)."
+  (let ((ctx (ignore-errors (org-element-context))))
+    (and ctx (eq (org-element-type ctx) 'link))))
+
+(defun nano/org-ret-dwim ()
+  "Follow org link at point, else `evil-ret'.  Bound to RET in org normal/motion."
+  (interactive)
+  (if (and (derived-mode-p 'org-mode)
+           (ignore-errors (nano/org-at-link-p)))
+      (call-interactively #'org-open-at-point)
+    (call-interactively #'evil-ret)))
 
 (with-eval-after-load 'org
-  ;; RET on link opens it (else autolist continues); http(s) goes
-  ;; to external browser via `browse-url'.
-  (setq org-return-follows-link t)
+  (with-eval-after-load 'evil
+    (evil-define-key 'normal org-mode-map (kbd "RET") #'nano/org-ret-dwim)
+    (evil-define-key 'normal org-mode-map (kbd "<return>") #'nano/org-ret-dwim)
+    (evil-define-key 'motion org-mode-map (kbd "RET") #'nano/org-ret-dwim)
+    (evil-define-key 'motion org-mode-map (kbd "<return>") #'nano/org-ret-dwim)))
+
+;; 18b2. Single-click mouse — belt-and-braces for §18pre: force
+;; `mouse-1-click-follows-link' t buffer-locally (single short click
+;; follows; long click sets point).  Guards machines where org.el
+;; loaded before §18pre on first bootstrap.
+(add-hook 'org-mode-hook
+          (lambda () (setq-local mouse-1-click-follows-link t)))
+
+;; 18b3. Autolist link guard — vendored `org-autolist' tests
+;; `(eq 'org-link face)' which misses list faces like
+;; `(org-link org-list-dt)' / fontified lists, so RET on a link inside
+;; a list item inserted an item instead of following.  Patch here (not
+;; in `straight/repos/') so `straight-pull-all' survives.
+(with-eval-after-load 'org-autolist
+  (defun nano/org-link-face-p ()
+    "Non-nil when `face' text property at point includes `org-link'."
+    (let ((f (get-text-property (point) 'face)))
+      (cond ((eq f 'org-link) t)
+            ((and (listp f) (memq 'org-link f)) t)
+            (t nil))))
+  (defun nano/org-on-link-p ()
+    "Non-nil when on org link via element or face (font-lock off safe)."
+    (or (ignore-errors (nano/org-at-link-p))
+        (nano/org-link-face-p)))
+  (ad-deactivate 'org-return)
+  (defadvice org-return (around nano/org-autolist-return)
+    "Autolist with link-face fix: follow link when on one, even in lists."
+    (let* ((el (org-element-at-point))
+           (parent (plist-get (cadr el) :parent))
+           (is-listitem (or (org-at-item-p)
+                            (and (eq 'paragraph (car el))
+                                 (eq 'item (car parent)))))
+           (is-checkbox (plist-get (cadr parent) :checkbox)))
+      (if (and is-listitem
+               (not (and org-return-follows-link
+                         (nano/org-on-link-p))))
+          (if (and (eolp)
+                   (org-at-item-p)
+                   (<= (point) (org-autolist-beginning-of-item-after-bullet)))
+              (condition-case nil
+                  (call-interactively 'org-outdent-item)
+                (error (delete-region (line-beginning-position)
+                                      (line-end-position))))
+            (cond (is-checkbox
+                   (org-insert-todo-heading nil))
+                  ((and (org-at-item-description-p)
+                        (> (point) (org-autolist-beginning-of-item-after-bullet))
+                        (< (point) (line-end-position)))
+                   (newline))
+                  (t (org-meta-return))))
+        ad-do-it)))
+  (ad-activate 'org-return))
+
+(with-eval-after-load 'org
+  ;; Folded open: overview shows level-1 headers only.
+  (setq org-startup-folded t)
   ;; Tags tight after headline: 0 = single space, no far-right pad.
   ;; nil stops realign on tag/todo edit.  Old files stay padded
   ;; until retag / `M-x org-align-tags'.
   (setq org-tags-column 0
         org-auto-align-tags nil)
   ;; TODO -> NEXT -> DONE.  `org-log-done' inserts CLOSED timestamp
-  ;; on DONE, no note prompt.  Cycle via `C-c C-t' / `S-<left/right>' / `, t'.
+  ;; on DONE, no note prompt.  `org-log-repeat' stays nil: builtin
+  ;; default `time' forces a "- State DONE from ..." note via
+  ;; post-command-hook on every repeater DONE (SCHEDULED/DEADLINE
+  ;; with +/.+), on top of reschedule + LAST_REPEAT.  Cycle via
+  ;; `C-c C-t' / `S-<left/right>' / `, t'.
   (setq org-todo-keywords '((sequence "TODO(t)" "NEXT(n)" "|" "DONE(d)"))
-        org-log-done 'time)
+        org-log-done 'time
+        org-log-repeat nil)
   ;; Babel: inline src_lang{} + #+BEGIN_SRC.  Built-in ob-* only,
   ;; lazy here so zero startup cost.  Confirm stays t (prompt per
   ;; execute, safe).  Shell/python need system binaries.
@@ -1206,9 +1465,9 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 
 ;; 18c. Curated leader additions (map created in §16c, hook already active).
 (nano/set-leader-keys-for-major-mode 'org-mode
-  "t" 'org-todo           ; cycle TODO->NEXT->DONE
-  "o" 'org-open-at-point  ; explicit open, fallback when RET shadowed
-  "R" 'nano/org-random-current-buffer) ; random headline, current buffer only
+                                     "t" 'org-todo           ; cycle TODO->NEXT->DONE
+                                     "o" 'org-open-at-point  ; explicit open, fallback when RET shadowed
+                                     "R" 'nano/org-random-current-buffer) ; random headline, current buffer only
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'org-mode)
   "t" "todo cycle" "o" "open link" "R" "random note (buffer)")
@@ -1228,6 +1487,44 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
   (interactive)
   (let ((org-randomnote-candidates 'current-buffer))
     (call-interactively #'org-randomnote)))
+
+;; 18e. Agenda — built-in org-agenda only, lazy, zero startup cost.
+;;      Top-level *.org under `nano/org-directory' (§18b), refreshed
+;;      before each open so new files appear with no restart.
+;;      Week starts Monday, span 7.  Skip DONE scheduled/deadline in
+;;      agenda; todo-list shows ALL (scheduled included).
+;;      Keys: SPC o a = dispatcher (pick `a' for week).
+;;      Roam alias/tag live on SPC o A / T (§21) + `, r a' / `, r t'.
+;;      Evil: motion state so SPC leader works, agenda keys intact.
+(defun nano/org-agenda-refresh-files ()
+  "Set `org-agenda-files' to top-level *.org under `nano/org-directory'.
+No-op (warn once via `nano/org-ensure-directory') when dir missing."
+  (when (nano/org-ensure-directory)
+    (setq org-agenda-files (nano/org-agenda-top-level-files))))
+
+(with-eval-after-load 'org-agenda
+  (setq org-agenda-span 7
+        org-agenda-start-on-weekday 1 ; Monday
+        org-agenda-start-day nil      ; week containing today
+        org-agenda-skip-scheduled-if-done t
+        org-agenda-skip-deadline-if-done t
+        org-agenda-todo-ignore-scheduled nil ; todo-list shows all
+        org-agenda-todo-ignore-deadlines nil))
+
+(advice-add 'org-agenda :before
+            (lambda (&rest _) (nano/org-agenda-refresh-files)))
+(advice-add 'org-todo-list :before
+            (lambda (&rest _) (nano/org-agenda-refresh-files)))
+
+(with-eval-after-load 'evil
+  ;; Evil defaults `org-agenda-mode' to emacs state (evil-vars.el),
+  ;; which hides SPC leader (bound only in normal/visual/motion).
+  ;; Motion keeps agenda keys, enables SPC.
+  (evil-set-initial-state 'org-agenda-mode 'motion))
+
+(define-key spacemacs-leader-map (kbd "o a") 'org-agenda)
+(which-key-add-key-based-replacements
+  "SPC o a" "agenda (week)")
 
 
 ;; ---------------------------------------------------------------------
@@ -1335,19 +1632,16 @@ With prefix ARG, also copy to kill-ring + clipboard."
 (define-key spacemacs-leader-map (kbd "i l s") 'nano/insert-lorem-sentences)
 (define-key spacemacs-leader-map (kbd "i l p") 'nano/insert-lorem-paragraphs)
 (define-key spacemacs-leader-map (kbd "i l l") 'nano/insert-lorem-list)
-(define-key spacemacs-leader-map (kbd "i p p") 'nano/insert-password)
+(define-key spacemacs-leader-map (kbd "i p") 'nano/insert-password)
 (define-key spacemacs-leader-map (kbd "i u") 'nano/insert-uuid-v4)
-(define-key spacemacs-leader-map (kbd "i U") 'nano/insert-uuid-v4)
 (which-key-add-key-based-replacements
   "SPC i" "insert"
   "SPC i l" "lorem ipsum"
   "SPC i l s" "insert sentences"
   "SPC i l p" "insert paragraphs"
   "SPC i l l" "insert list"
-  "SPC i p" "password"
-  "SPC i p p" "generate + insert password"
-  "SPC i u" "insert UUID v4"
-  "SPC i U" "insert UUID v4")
+  "SPC i p" "insert password"
+  "SPC i u" "insert UUID v4")
 
 
 ;; ---------------------------------------------------------------------
@@ -1383,20 +1677,20 @@ With prefix ARG, also copy to kill-ring + clipboard."
 ;;      v = read-only view (no external processor needed).
 (dolist (mode '(markdown-mode gfm-mode))
   (nano/set-leader-keys-for-major-mode mode
-    "b" 'markdown-insert-bold
-    "i" 'markdown-insert-italic
-    "c" 'markdown-insert-code
-    "s" 'markdown-insert-strike-through
-    "l" 'markdown-insert-link
-    "I" 'markdown-insert-image
-    "q" 'markdown-insert-blockquote
-    "p" 'markdown-insert-pre
-    "P" 'markdown-insert-gfm-code-block
-    "n" 'markdown-insert-list-item
-    "h" 'markdown-insert-header-dwim
-    "f" 'markdown-insert-footnote
-    "o" 'markdown-do
-    "v" 'markdown-view-mode)
+                                       "b" 'markdown-insert-bold
+                                       "i" 'markdown-insert-italic
+                                       "c" 'markdown-insert-code
+                                       "s" 'markdown-insert-strike-through
+                                       "l" 'markdown-insert-link
+                                       "I" 'markdown-insert-image
+                                       "q" 'markdown-insert-blockquote
+                                       "p" 'markdown-insert-pre
+                                       "P" 'markdown-insert-gfm-code-block
+                                       "n" 'markdown-insert-list-item
+                                       "h" 'markdown-insert-header-dwim
+                                       "f" 'markdown-insert-footnote
+                                       "o" 'markdown-do
+                                       "v" 'markdown-view-mode)
   (which-key-add-keymap-based-replacements
     (nano/major-mode-leader-map mode)
     "b" "bold" "i" "italic"
@@ -1414,7 +1708,7 @@ With prefix ARG, also copy to kill-ring + clipboard."
 
 
 ;; ---------------------------------------------------------------------
-;; §21  Roam  (org-roam + sqlite-builtin, , r / SPC a o, lazy)
+;; §21  Roam  (org-roam + sqlite-builtin, , r / SPC o, lazy)
 ;; ---------------------------------------------------------------------
 ;; Deps reused: dash/f/s (§18d via org-randomnote), magit-section
 ;; (§10 via magit build), org built-in 9.7 (§0 pin), sqlite
@@ -1449,36 +1743,106 @@ With prefix ARG, also copy to kill-ring + clipboard."
         ((fboundp 'org-roam-setup)
          (org-roam-setup))))
 
+;; 21a1. `id:' open needs DB ready even before first roam command.
+;; Lazy once per session on first org buffer (not at startup):
+;; requires roam (autoloads already), then autosync.  Gated on dir.
+(defvar nano/org-roam-autosync-done nil
+  "Non-nil once `org-roam-db-autosync-mode' enabled this session.")
+(defun nano/org-roam-ensure-autosync ()
+  "Enable `org-roam-db-autosync-mode' once, for `id:' link opening."
+  (when (and (not nano/org-roam-autosync-done)
+             (nano/org-ensure-directory))
+    (require 'org-roam nil t)
+    (require 'org-id nil t)
+    (when (fboundp 'org-roam-db-autosync-mode)
+      (org-roam-db-autosync-mode 1)
+      (setq nano/org-roam-autosync-done t))))
+(add-hook 'org-mode-hook #'nano/org-roam-ensure-autosync)
+
 ;; 21b/c. Single source: (major-suffix global-suffix fn label).
 ;;      `, r' (+ `SPC m r') in org buffers reuses §16 infra; hook
 ;;      already active (§16c), so map shows once org loads.
-;;      `SPC a o' is global fallback for non-org buffers (same targets).
+;;      `SPC o' is global fallback for non-org buffers (same targets).
 ;;      Dailies need no extra dep (built into roam).
 (defvar nano/org-roam-bindings
-  '(("rf"  "a o f"   org-roam-node-find              "find")
-    ("ri"  "a o i"   org-roam-node-insert            "insert")
-    ("rc"  "a o c"   org-roam-capture                "capture")
-    ("rl"  "a o l"   org-roam-buffer-toggle          "backlinks")
-    ("rg"  "a o g"   org-roam-graph                  "graph")
-    ("rs"  "a o s"   org-roam-db-sync                "sync")
-    ("ra"  "a o a"   org-roam-alias-add              "alias add")
-    ("rt"  "a o t"   org-roam-tag-add                "tag add")
-    ("rdT" "a o d T" org-roam-dailies-capture-today     "dailies today")
-    ("rdY" "a o d Y" org-roam-dailies-capture-yesterday "dailies yesterday")
-    ("rdt" "a o d t" org-roam-dailies-goto-today        "go today")
-    ("rdy" "a o d y" org-roam-dailies-goto-yesterday    "go yesterday")
-    ("rdn" "a o d n" org-roam-dailies-goto-tomorrow     "go tomorrow")
-    ("rdd" "a o d d" org-roam-dailies-goto-date         "go date"))
-  "Roam commands shared by `, r' (§21b) and `SPC a o' (§21c).")
+  '(("rf"  "o f"   org-roam-node-find              "find")
+    ("ri"  "o i"   org-roam-node-insert            "insert")
+    ("rc"  "o c"   org-roam-capture                "capture")
+    ("rl"  "o l"   org-roam-buffer-toggle          "backlinks")
+    ("rg"  "o g"   org-roam-graph                  "graph")
+    ("rs"  "o s"   org-roam-db-sync                "sync")
+    ("ra"  "o A"   org-roam-alias-add              "alias add")
+    ("rt"  "o T"   org-roam-tag-add                "tag add")
+    ("rdT" "o d T" org-roam-dailies-capture-today     "dailies today")
+    ("rdY" "o d Y" org-roam-dailies-capture-yesterday "dailies yesterday")
+    ("rdt" "o d t" org-roam-dailies-goto-today        "go today")
+    ("rdy" "o d y" org-roam-dailies-goto-yesterday    "go yesterday")
+    ("rdn" "o d n" org-roam-dailies-goto-tomorrow     "go tomorrow")
+    ("rdd" "o d d" org-roam-dailies-goto-date         "go date"))
+  "Roam commands shared by `, r' (§21b) and `SPC o' (§21c).")
 
 (nano/declare-major-prefix 'org-mode "r" "roam")
 (dolist (b nano/org-roam-bindings)
   (nano/set-leader-keys-for-major-mode 'org-mode (nth 0 b) (nth 2 b))
   (define-key spacemacs-leader-map (kbd (nth 1 b)) (nth 2 b))
   (which-key-add-keymap-based-replacements
-   (nano/major-mode-leader-map 'org-mode) (nth 0 b) (nth 3 b))
+    (nano/major-mode-leader-map 'org-mode) (nth 0 b) (nth 3 b))
   (which-key-add-key-based-replacements
-   (concat "SPC " (nth 1 b)) (nth 3 b)))
-(which-key-add-key-based-replacements "SPC a o d" "dailies")
+    (concat "SPC " (nth 1 b)) (nth 3 b)))
+(which-key-add-key-based-replacements "SPC o d" "dailies")
+
+
+;; ---------------------------------------------------------------------
+;; §22  Update  (float latest, SPC f e U pull+rebuild)
+;; ---------------------------------------------------------------------
+;; Spacemacs `SPC f e U' parity.  Floats latest, no lockfile.
+;; `straight-pull-all' = fetch+merge only, then `straight-rebuild-all'
+;; applies builds.  Blocking, may freeze briefly.  Restart after: SPC q r.
+(defun nano/update-packages ()
+  "Pull latest for all straight packages, then rebuild.  Bound to SPC f e U."
+  (interactive)
+  (message "Updating packages...")
+  (straight-pull-all)
+  (straight-rebuild-all)
+  (message "Packages updated.  Restart with SPC q r."))
+(define-key spacemacs-leader-map (kbd "f e U") 'nano/update-packages)
+(which-key-add-key-based-replacements
+  "SPC f e" "emacs/config"
+  "SPC f e U" "update packages")
+
+;; ---------------------------------------------------------------------
+;; §23  Web  (built-in eww + elfeed, SPC a w, lazy)
+;; ---------------------------------------------------------------------
+;; Zero startup cost: no `require', straight autoloads (elfeed) +
+;; built-in autoload (eww) only.  First `SPC a w r' builds elfeed.
+;; Feeds left default (`elfeed-feeds'); configure user-local on demand.
+(straight-use-package 'elfeed)
+
+(define-key spacemacs-leader-map (kbd "a w e") 'eww)
+(define-key spacemacs-leader-map (kbd "a w r") 'elfeed)
+(which-key-add-key-based-replacements
+  "SPC a w e" "open eww"
+  "SPC a w r" "open elfeed")
 
 ;;; init.el ends here
+(custom-set-variables
+ ;; custom-set-variables was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ '(org-agenda-files
+   '("/home/ykgoon/Dropbox/org/data.org"
+     "/home/ykgoon/Dropbox/org/exocortex.org"
+     "/home/ykgoon/Dropbox/org/ideas.org"
+     "/home/ykgoon/Dropbox/org/kakitangan.org"
+     "/home/ykgoon/Dropbox/org/plays.org"
+     "/home/ykgoon/Dropbox/org/read_later.org"
+     "/home/ykgoon/Dropbox/org/stories.org"
+     "/home/ykgoon/Dropbox/org/tin_shue.org"
+     "/home/ykgoon/Dropbox/org/todo.org")))
+(custom-set-faces
+ ;; custom-set-faces was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ )
