@@ -27,7 +27,7 @@
 ;;   §15 Text  (SPC x, built-in + link-hint lazy)
 ;;   §16 Major-mode leader  (, + SPC m, V0 fallback + V1 org curated)
 ;;   §17  Jump  (avy, SPC j, lazy)
-;;   §18  Org  (autolist, links, tags, todo flow, babel, agenda, random)
+;;   §18  Org  (autolist, links, tags, todo flow, babel, agenda, random, bullets)
 ;;   §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
 ;;   §20  Markdown  (markdown-mode + gfm, SPC m / ,, lazy)
 ;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC o, lazy)
@@ -417,8 +417,32 @@ Bound to SPC q q."
 (which-key-add-key-based-replacements "SPC q q" "quit"
   "SPC q r" "restart")
 
-;; 5e. Search & help  (SPC s / SPC h)
-(define-key spacemacs-leader-map (kbd "s s") 'isearch-forward)
+;; 5d2. Special-buffer window restore — org-agenda.
+;; Desktop writes `desktop-create-buffer' entries for file buffers only,
+;; unless buffer-local `desktop-save-buffer' is non-nil; org-agenda never
+;; sets it, so a saved frameset leaf points at a buffer that is never
+;; recreated — frameset then drops the whole split (single window after
+;; restart; reproduced: file + *Org Agenda* side-by-side → wins=1).
+;; Fix: mark agenda buffers saveable + rebuild on read via mode handler
+;; (args FILENAME BUFNAME MISC, returns live buffer). `org-agenda-list'
+;; is autoloaded (built-in org), zero startup cost. Elfeed needs nothing:
+;; it already sets `desktop-save-buffer' and restores its entry.
+(defun nano/desktop-restore-org-agenda (_file _name _misc)
+  "Rebuild agenda buffer for desktop restore.  Returns live buffer."
+  (unless (fboundp 'org-agenda-list)
+    (require 'org-agenda))
+  (when (fboundp 'nano/org-agenda-refresh-files)
+    (nano/org-agenda-refresh-files))
+  (org-agenda-list)
+  (get-buffer org-agenda-buffer-name))
+(add-to-list 'desktop-buffer-mode-handlers
+             '(org-agenda-mode . nano/desktop-restore-org-agenda))
+(with-eval-after-load 'desktop
+  (add-hook 'org-agenda-mode-hook
+            (lambda () (setq-local desktop-save-buffer t))))
+
+;; 5e. Help  (SPC h)
+;; SPC s search bindings live in §12; isearch still on C-s / C-r natively.
 ;; SPC h group label declared in §4; add help bindings here as needed.
 
 ;; 5f. Comment  (SPC c l)
@@ -903,29 +927,88 @@ With prefix ARG, pass through to `tab-bar-new-tab'."
   (tab-bar-new-tab arg)
   (call-interactively #'tab-bar-rename-tab))
 
-;; 9a. Core ops  (SPC l ...)
-(define-key spacemacs-leader-map (kbd "l l") 'tab-bar-switch-to-tab)
-(define-key spacemacs-leader-map (kbd "l n") 'nano/workspace-new-tab)
-(define-key spacemacs-leader-map (kbd "l d") 'tab-bar-close-tab)
-(define-key spacemacs-leader-map (kbd "l r") 'tab-bar-rename-tab)
-(define-key spacemacs-leader-map (kbd "l ]") 'tab-bar-switch-to-next-tab)
-(define-key spacemacs-leader-map (kbd "l [") 'tab-bar-switch-to-prev-tab)
-(define-key spacemacs-leader-map (kbd "l TAB") 'tab-bar-switch-to-last-tab)
-(define-key spacemacs-leader-map (kbd "l b") 'switch-to-buffer)
-(dotimes (i 9)
-  (let ((n (1+ i)))
-    (define-key spacemacs-leader-map
-                (kbd (format "l %d" n))
-                `(lambda () (interactive) (tab-bar-select-tab ,n)))))
-(which-key-add-key-based-replacements
-  "SPC l l" "switch workspace"
-  "SPC l n" "new workspace"
-  "SPC l d" "close workspace"
-  "SPC l r" "rename workspace"
-  "SPC l ]" "next workspace"
-  "SPC l [" "prev workspace"
-  "SPC l TAB" "last workspace"
-  "SPC l b" "buffer in workspace")
+;; 9a. Workspaces transient  (SPC l) — Spacemacs eyebrowse-TS emulation, zero-dep.
+;; Bare `SPC l' shows live workspaces (`[1:main] | 2:code', current bracketed)
+;; then reads one key, looping until RET/ESC/q (next/prev/TAB stay in loop).
+;; Old `SPC l X' muscle memory preserved: after `SPC l' runs, the follow-up
+;; X arrives via `read-key' (same letters as before, `d' renamed to `x').
+;; `1..9' select-or-create (Spacemacs nth/new) with NO separate bindings,
+;; so which-key has nothing verbose to display — functionality lives here.
+(defun nano/workspace--tabs ()
+  "Tabs of selected frame as (INDEX NAME CURRENT-P) list.  INDEX from 1."
+  (let ((i 0)
+        (cur (1+ (tab-bar--current-tab-index))))
+    (mapcar (lambda (tab)
+              (setq i (1+ i))
+              (list i
+                    (or (and (alist-get 'explicit-name tab)
+                             (alist-get 'name tab))
+                        (alist-get 'name tab)
+                        (number-to-string i))
+                    (= i cur)))
+            (tab-bar-tabs))))
+
+(defun nano/workspace--hint ()
+  "One-liner workspace list + key legend, Spacemacs-TS style."
+  (concat
+   (mapconcat (lambda (w)
+                (let ((s (format "%d:%s" (nth 0 w) (nth 1 w))))
+                  (if (nth 2 w)
+                      (propertize (concat "[" s "]") 'face 'warning)
+                    s)))
+              (nano/workspace--tabs) " | ")
+   "  (1-9 go/new, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q quit)"))
+
+(defun nano/workspace-select-or-create (n)
+  "Switch to workspace N; create trailing workspace when N beyond last.
+Spacemacs nth/new parity — tab-bar is gapless, so N past end appends."
+  (let ((count (length (tab-bar-tabs))))
+    (if (<= n count)
+        (let ((name (nth 1 (nth (1- n) (nano/workspace--tabs)))))
+          (tab-bar-select-tab n)
+          (message "Workspace: %d:%s" n name))
+      (tab-bar-new-tab)
+      (message "Workspace %d created" (length (tab-bar-tabs))))))
+
+(defun nano/workspace-list-and-switch ()
+  "Pick workspace via completing-read (`N: name', current marked).  `SPC l l'."
+  (let* ((cands (mapcar (lambda (w)
+                          (cons (format "%d: %s%s" (nth 0 w) (nth 1 w)
+                                        (if (nth 2 w) " *" ""))
+                                (nth 0 w)))
+                        (nano/workspace--tabs)))
+         (pick (completing-read "Workspace: " cands nil t)))
+    (when pick
+      (nano/workspace-select-or-create (cdr (assoc pick cands))))))
+
+(defun nano/workspace-dispatch ()
+  "Workspace transient.  Bound to bare `SPC l'."
+  (interactive)
+  (let ((done nil))
+    (while (not done)
+      (let ((ev (read-key (concat (nano/workspace--hint) "\nWorkspace: "))))
+        (cond
+         ((and (integerp ev) (>= ev ?1) (<= ev ?9))
+          (nano/workspace-select-or-create (- ev ?0))
+          (setq done t))
+         ((eq ev ?n) (nano/workspace-new-tab nil) (setq done t))
+         ((eq ev ?x)
+          (if (= (length (tab-bar-tabs)) 1)
+              (message "Last workspace cannot be closed")
+            (tab-bar-close-tab)
+            (message "Workspace closed")
+            (setq done t)))
+         ((eq ev ?r) (call-interactively #'tab-bar-rename-tab) (setq done t))
+         ((eq ev ?\]) (tab-bar-switch-to-next-tab))
+         ((eq ev ?\[) (tab-bar-switch-to-prev-tab))
+         ((eq ev ?\t) (tab-bar-switch-to-last-tab))
+         ((eq ev ?l) (nano/workspace-list-and-switch) (setq done t))
+         ((eq ev ?b) (call-interactively #'switch-to-buffer) (setq done t))
+         ((memq ev (list ?q ?\r ?\e)) (setq done t) (message nil))
+         ((eq ev ??) (message "Keys: 1-9 go/create, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q quit"))
+         (t (message "Unknown workspace key: %s" (key-description (vector ev)))))))))
+
+(define-key spacemacs-leader-map (kbd "l") 'nano/workspace-dispatch)
 
 ;; 9b. Vim-style cycle (Spacemacs eyebrowse `gt/gT' parity)
 (define-key evil-motion-state-map (kbd "gt") 'tab-bar-switch-to-next-tab)
@@ -1050,7 +1133,8 @@ With prefix ARG, pass through to `tab-bar-new-tab'."
 ;; .gitignore, skips hidden/binary, parallel.  `fd'/`ag' absent,
 ;; `grep'/`find' slower, `fzf' needs a source list anyway.
 ;; Zero-dep: built-in project.el + xref + grep + fido-vertical (§8) only.
-;; SPC s s (isearch) stays in §5e; this section adds s f / s g / s d.
+;; SPC s s lists buffer lines via completing-read (fido-vertical shows
+;; all on empty input, flex filters as you type); s f / s g / s d below.
 (require 'xref)
 (require 'grep)
 
@@ -1123,10 +1207,55 @@ falls back to built-in `rgrep' + one-time install hint."
         (grep cmd))
     (rgrep regexp "*" dir)))
 
+(defun nano/search-buffer-lines ()
+  "Search lines in current buffer with completion.  Bound to SPC s s.
+Shows all non-empty lines via `completing-read' (fido-vertical §8
+lists all on empty input, flex filters as you type, like SPC f f).
+RET jumps to chosen line, pushing mark first.  Initial input is
+symbol at point.  Skips empty lines, truncates long lines for display."
+  (interactive)
+  (let ((cands nil)
+        (n 0)
+        (truncated nil))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (point-min))
+        (while (not (eobp))
+          (setq n (1+ n))
+          (let ((text (string-trim
+                       (buffer-substring-no-properties
+                        (line-beginning-position) (line-end-position)))))
+            (unless (string-empty-p text)
+              (when (> (length text) 200)
+                (setq text (concat (substring text 0 200) "…")))
+              (push (format "%d: %s" n text) cands)))
+          (forward-line 1)
+          (when (and (> n 10000) (not truncated))
+            (setq truncated t)
+            (message "SPC s s: buffer >10000 lines, listing first 10000")
+            (goto-char (point-max))))))
+    (unless cands
+      (user-error "SPC s s: no non-empty lines"))
+    (let ((choice (completing-read "Search lines: " (nreverse cands) nil t
+                                   nil nil (thing-at-point 'symbol))))
+      (when (string-match "^\\([0-9]+\\): " choice)
+        (let ((ln (string-to-number (match-string 1 choice))))
+          (push-mark nil t)
+          (save-restriction
+            (widen)
+            (goto-char (point-min))
+            (forward-line (1- ln))
+            (back-to-indentation))
+          (ignore-errors (recenter))
+          (message "line %d" ln))))))
+
+(define-key spacemacs-leader-map (kbd "s s") 'nano/search-buffer-lines)
 (define-key spacemacs-leader-map (kbd "s f") 'nano/rg-find-file)
 (define-key spacemacs-leader-map (kbd "s g") 'nano/search-grep)
 (define-key spacemacs-leader-map (kbd "s d") 'nano/search-grep-in-dir)
 (which-key-add-key-based-replacements
+  "SPC s s" "search lines"
   "SPC s f" "find file (rg)"
   "SPC s g" "grep project (rg)"
   "SPC s d" "grep dir (rg)")
@@ -1481,7 +1610,7 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 
 
 ;; ---------------------------------------------------------------------
-;; §18  Org  (autolist, links, tags, todo flow, babel, agenda, random)
+;; §18  Org  (autolist, links, tags, todo flow, babel, agenda, random, bullets)
 ;; ---------------------------------------------------------------------
 ;; Built-in org 9.7 + org-autolist + org-randomnote + built-in ob-* only.  Zero startup cost: no
 ;; `require 'org'; everything lazy via hook / with-eval-after-load.
@@ -1839,6 +1968,41 @@ No-op (warn once via `nano/org-ensure-directory') when dir missing."
 (which-key-add-key-based-replacements
   "SPC o a" "agenda (week)")
 
+;; 18f. Bullets — zero-dep Spacemacs parity (no org-superstar fetch).
+;;      File keeps `*'; display composes leading stars per heading:
+;;      first N-1 stars -> space (indent), last star -> bullet cycled
+;;      by level over `nano/org-bullet-list' (■ ◆ ▲ ▶, Noto Sans Mono safe).
+;;      Inherits `org-level-N' face (nano-theme strong) via prepend=nil
+;;      side-effect matcher.  `org-hide-leading-stars' stays nil locally.
+(defvar nano/org-bullet-list '(?■ ?◆ ?▲ ?▶)
+  "Bullets cycled per org heading level (L1->■, L2->◆, ...).")
+
+(defun nano/org-bullets--compose (beg end)
+  "Compose stars in [BEG,END) to indent + bullet.  Font-lock side effect."
+  (let* ((level (- end beg))
+         (bullet (nth (% (1- level) (length nano/org-bullet-list))
+                      nano/org-bullet-list)))
+    (decompose-region beg end)
+    (dotimes (i level)
+      (compose-region (+ beg i) (+ beg i 1)
+                      (if (< i (1- level)) ?\s bullet)))))
+
+(defun nano/org-bullets-enable ()
+  "Enable Spacemacs-style bullets in current org buffer."
+  (unless (bound-and-true-p nano/org-bullets-enabled)
+    (setq-local org-hide-leading-stars nil)
+    (font-lock-add-keywords
+     nil '(("^\\(\\*+\\) "
+            (0 (progn (nano/org-bullets--compose
+                       (match-beginning 1) (match-end 1))
+                      nil))))
+     t)
+    (setq-local nano/org-bullets-enabled t))
+  (when (bound-and-true-p font-lock-mode)
+    (font-lock-flush)))
+
+(add-hook 'org-mode-hook #'nano/org-bullets-enable)
+
 
 ;; ---------------------------------------------------------------------
 ;; §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
@@ -2179,7 +2343,8 @@ With prefix ARG, also copy to kill-ring + clipboard."
               (elfeed-search--header)))))
 
 (with-eval-after-load 'elfeed-search
-  (ignore-errors (require 'elfeed-goodies-search-mode))
+  (unless (require 'elfeed-goodies-search-mode nil t)
+    (message "nano: elfeed-goodies-search-mode missing, using built-in header"))
   (setq elfeed-search-header-function #'nano/elfeed-search-header))
 
 (with-eval-after-load 'evil
@@ -2232,12 +2397,13 @@ With prefix ARG, also copy to kill-ring + clipboard."
 ;; 23c. ttrss read/star/publish sync for existing entries.
 ;;      Protocol only reconciles headlines returned during update (new
 ;;      ids); state changed elsewhere never reaches downloaded entries.
-;;      Pull current state for every local entry, re-apply tags via
-;;      `elfeed-protocol-ttrss--parse-entries' (idempotent).  Runtime-only
-;;      internal calls, so safe under lazy load.
+;;      Manual command only (no `elfeed-update-hooks'): full sync each
+;;      update storms network on large DBs.  Own `nano/' prefix avoids
+;;      collision with upstream `elfeed-protocol-ttrss--*' internals.
+;;      Upstream `--parse-entries' call guarded by `fboundp'.
 (with-eval-after-load 'elfeed-protocol
   (require 'cl-lib)
-  (defun elfeed-protocol-ttrss--existing-ids (host-url)
+  (defun nano/elfeed-ttrss-existing-ids (host-url)
     "Return ttrss article ids of existing local elfeed entries.
 HOST-URL is the ttrss host."
     (let* ((proto-id (elfeed-protocol-ttrss-id host-url))
@@ -2245,25 +2411,27 @@ HOST-URL is the ttrss host."
       (elfeed-db-visit (entry)
         (when (equal (elfeed-protocol-entry-protocol-id entry) proto-id)
           (let ((id (elfeed-meta entry :id)))
-            (when (and id (not (memq id ids)))
+            (when (and id (not (member id ids)))
               (push id ids)))))
       (nreverse ids)))
 
-  (defun elfeed-protocol-ttrss--sync-state-batch (host-url ids batches)
+  (defun nano/elfeed-ttrss-sync-state-batch (host-url ids batches)
     "Sync state for one IDS chunk, then recurse on BATCHES."
-    (let* ((data-list `(("op" . "getArticle")
-                        ("sid" . ,elfeed-protocol-ttrss-sid)
-                        ("article_id" .
-                         ,(apply #'elfeed-protocol-join-ids-to-str "," ids)))))
-      (elfeed-protocol-ttrss-with-fetch
-        host-url "POST" (json-encode-alist data-list)
-        (elfeed-protocol-ttrss--parse-entries host-url content nil 'update)
-        (if batches
-            (funcall #'elfeed-protocol-ttrss--sync-state-batch
-                     host-url (car batches) (cdr batches))
-          (elfeed-log 'debug "elfeed-protocol-ttrss: existing state sync done")))))
+    (if (not (fboundp 'elfeed-protocol-ttrss--parse-entries))
+        (elfeed-log 'warn "nano/elfeed-ttrss: upstream parse-entries missing, aborting sync")
+      (let* ((data-list `(("op" . "getArticle")
+                          ("sid" . ,elfeed-protocol-ttrss-sid)
+                          ("article_id" .
+                           ,(apply #'elfeed-protocol-join-ids-to-str "," ids)))))
+        (elfeed-protocol-ttrss-with-fetch
+          host-url "POST" (json-encode-alist data-list)
+          (elfeed-protocol-ttrss--parse-entries host-url content nil 'update)
+          (if batches
+              (funcall #'nano/elfeed-ttrss-sync-state-batch
+                       host-url (car batches) (cdr batches))
+            (elfeed-log 'debug "nano/elfeed-ttrss: existing state sync done"))))))
 
-  (defun elfeed-protocol-ttrss--split-ids (ids size)
+  (defun nano/elfeed-ttrss-split-ids (ids size)
     "Split integer list IDS into sublists of at most SIZE elements."
     (let ((result nil))
       (while ids
@@ -2271,7 +2439,7 @@ HOST-URL is the ttrss host."
         (setq ids (nthcdr size ids)))
       (nreverse result)))
 
-  (defun elfeed-protocol-ttrss-sync-read-state (host-url)
+  (defun nano/elfeed-ttrss-sync-read-state (host-url)
     "Sync read/unread/star/publish state for existing elfeed entries.
 HOST-URL is ttrss host or protocol feed url."
     (interactive (list (elfeed-protocol-url
@@ -2280,22 +2448,14 @@ HOST-URL is ttrss host or protocol feed url."
            (proto-id (elfeed-protocol-ttrss-id host-url)))
       (elfeed-protocol-ttrss-fetch-prepare
         host-url
-        (let* ((ids (elfeed-protocol-ttrss--existing-ids host-url))
-               (batches (elfeed-protocol-ttrss--split-ids ids 200)))
+        (let* ((ids (nano/elfeed-ttrss-existing-ids host-url))
+               (batches (nano/elfeed-ttrss-split-ids ids 200)))
           (when ids
             (elfeed-log 'debug
-                        "elfeed-protocol-ttrss: syncing state of %d existing entries (in %d batches)"
+                        "nano/elfeed-ttrss: syncing state of %d existing entries (in %d batches)"
                         (length ids) (length batches))
-            (funcall #'elfeed-protocol-ttrss--sync-state-batch
-                     host-url (car batches) (cdr batches)))))))
-
-  (defun elfeed-protocol-ttrss-sync-read-state-hook (host-url)
-    "Sync existing-entry state after ttrss update.  For `elfeed-update-hooks'."
-    (let ((proto-id (elfeed-protocol-ttrss-id host-url)))
-      (when (and host-url (elfeed-protocol-meta-feed proto-id))
-        (elfeed-protocol-ttrss-sync-read-state host-url))))
-
-  (add-hook 'elfeed-update-hooks #'elfeed-protocol-ttrss-sync-read-state-hook))
+            (funcall #'nano/elfeed-ttrss-sync-state-batch
+                     host-url (car batches) (cdr batches))))))))
 
 ;;; init.el ends here
 (custom-set-variables
