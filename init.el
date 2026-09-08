@@ -33,6 +33,7 @@
 ;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC o, lazy)
 ;;   §22  Update  (float latest, SPC f e U pull+rebuild)
 ;;   §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
+;;   §24  Select  (expand-region, SPC v, lazy)
 ;; =====================================================================
 
 
@@ -227,6 +228,7 @@
   "SPC t" "toggle"
   "SPC i" "insert"
   "SPC a" "apps"
+  "SPC v" "expand region"
   "SPC o" "org-mode"
   "SPC a w" "web"
   "SPC z" "zoom"
@@ -1071,6 +1073,32 @@ Spacemacs nth/new parity — tab-bar is gapless, so N past end appends."
     (when (boundp 'magit-mode-map)
       (evil-define-key '(normal visual motion) magit-mode-map
         (kbd "SPC") spacemacs-leader-map))))
+
+;; M-0..M-9 = winum inside magit (Spacemacs parity).
+;; winum-keymap is minor-mode map; evil state maps (emulation) win,
+;; so magit-section-mode-map M-1..M-4 (show-level-*-all,
+;; magit-section.el) shadow winum in motion/normal.  Rebind here,
+;; same technique as SPC above.  Covers all magit modes (parent map).
+;; Displaced show-level-*-all -> C-M-1..C-M-4 (free, checked).
+;; M-0 extra vs Spacemacs (they bind 1..9 only); keeps §6 0-or-10.
+(with-eval-after-load 'magit-section
+  (with-eval-after-load 'evil
+    (when (boundp 'magit-section-mode-map)
+      (evil-define-key '(normal motion) magit-section-mode-map
+        (kbd "M-0") 'winum-select-window-0-or-10
+        (kbd "M-1") 'winum-select-window-1
+        (kbd "M-2") 'winum-select-window-2
+        (kbd "M-3") 'winum-select-window-3
+        (kbd "M-4") 'winum-select-window-4
+        (kbd "M-5") 'winum-select-window-5
+        (kbd "M-6") 'winum-select-window-6
+        (kbd "M-7") 'winum-select-window-7
+        (kbd "M-8") 'winum-select-window-8
+        (kbd "M-9") 'winum-select-window-9
+        (kbd "C-M-1") 'magit-section-show-level-1-all
+        (kbd "C-M-2") 'magit-section-show-level-2-all
+        (kbd "C-M-3") 'magit-section-show-level-3-all
+        (kbd "C-M-4") 'magit-section-show-level-4-all))))
 
 ;; 10a. Bindings
 (define-key spacemacs-leader-map (kbd "g s") 'magit-status)
@@ -2382,25 +2410,43 @@ With prefix ARG, also copy to kill-ring + clipboard."
         "o" #'elfeed-goodies/show-ace-link))))
 
 ;; 23b. ttrss via elfeed-protocol — hardcoded per user choice.
-;;      Setqs cheap at startup; enable deferred until protocol loads.
-;;      Secret lives in gitignored var/ttrss-pass (chmod 600, no newline),
+;;      Setqs cheap at startup; enable lazy but guaranteed on first use.
+;;      Old nested with-eval-after-load elfeed+protocol never fired —
+;;      nothing ever loaded elfeed-protocol, so fetcher hook missing
+;;      and ttrss+ URLs fell through to plain HTTP (empty buffer).
+;;      Secret lives in gitignored var/ttrss-pass (chmod 600),
 ;;      injected via :password-file — never in repo.
 (setq elfeed-protocol-ttrss-maxsize 200)
 (setq elfeed-protocol-ttrss-fetch-category-as-tag t)
 (setq elfeed-feeds `(("ttrss+http://admin@grex-bravo:181"
                       :password-file ,(locate-user-emacs-file "var/ttrss-pass"))))
 
+(defun nano/elfeed-protocol-ensure ()
+  "Load + enable elfeed-protocol once, lazily on first elfeed use.
+Idempotent: skips when `elfeed-protocol-fetcher' already hooked."
+  (when (boundp 'elfeed-fetch-functions)
+    (unless (memq #'elfeed-protocol-fetcher elfeed-fetch-functions)
+      (require 'elfeed-protocol nil t)
+      (when (fboundp 'elfeed-protocol-enable)
+        (elfeed-protocol-enable)))))
+
 (with-eval-after-load 'elfeed
-  (with-eval-after-load 'elfeed-protocol
-    (elfeed-protocol-enable)))
+  (nano/elfeed-protocol-ensure))
+(add-hook 'elfeed-update-init-hook #'nano/elfeed-protocol-ensure)
+
+;; Trim password-file content (upstream keeps trailing newline).
+;; `string-trim' from subr-x (§7).  Guards editors adding newline.
+(with-eval-after-load 'elfeed-protocol-common
+  (advice-add 'elfeed-protocol-get-string-from-file
+              :filter-return #'string-trim))
 
 ;; 23c. ttrss read/star/publish sync for existing entries.
 ;;      Protocol only reconciles headlines returned during update (new
 ;;      ids); state changed elsewhere never reaches downloaded entries.
-;;      Manual command only (no `elfeed-update-hooks'): full sync each
-;;      update storms network on large DBs.  Own `nano/' prefix avoids
-;;      collision with upstream `elfeed-protocol-ttrss--*' internals.
-;;      Upstream `--parse-entries' call guarded by `fboundp'.
+;;      Auto hook after each update (Spacemacs parity) + manual command.
+;;      Own `nano/' prefix avoids collision with upstream
+;;      `elfeed-protocol-ttrss--*' internals.  Upstream `--parse-entries'
+;;      call guarded by `fboundp'.
 (with-eval-after-load 'elfeed-protocol
   (require 'cl-lib)
   (defun nano/elfeed-ttrss-existing-ids (host-url)
@@ -2455,7 +2501,36 @@ HOST-URL is ttrss host or protocol feed url."
                         "nano/elfeed-ttrss: syncing state of %d existing entries (in %d batches)"
                         (length ids) (length batches))
             (funcall #'nano/elfeed-ttrss-sync-state-batch
-                     host-url (car batches) (cdr batches))))))))
+                     host-url (car batches) (cdr batches)))))))
+
+  (defun nano/elfeed-ttrss-sync-read-state-hook (feed-url)
+    "Sync existing-entry state after ttrss update.  For `elfeed-update-hooks'.
+Feed-url is the protocol feed (\"ttrss+host\"): strip prefix first —
+upstream passes it verbatim, and `elfeed-protocol-ttrss-id' prepends
+unconditionally, so a raw use yields a doubled id and silently skips."
+    (let* ((host (elfeed-protocol-url feed-url))
+           (proto-id (and host (ignore-errors (elfeed-protocol-ttrss-id host)))))
+      (when (and host proto-id
+                 (ignore-errors (elfeed-protocol-meta-feed proto-id)))
+        (ignore-errors (nano/elfeed-ttrss-sync-read-state host))))))
+
+(add-hook 'elfeed-update-hooks #'nano/elfeed-ttrss-sync-read-state-hook)
+
+;; ---------------------------------------------------------------------
+;; §24  Select  (expand-region, SPC v, lazy)
+;; ---------------------------------------------------------------------
+;; Spacemacs `SPC v' parity: `er/expand-region' + repeat
+;; (`v' expand, `V' contract, `r' reset, `ESC' quit).
+;; Zero startup cost: no `require', straight autoloads only.
+;; Leader already in normal/visual/motion (§4), so SPC v works there.
+(straight-use-package 'expand-region)
+
+;; Spacemacs fast keys (spacemacs-editing/packages.el:202-203).
+(setq expand-region-contract-fast-key "V"
+      expand-region-reset-fast-key "r")
+
+(define-key spacemacs-leader-map (kbd "v") 'er/expand-region)
+(which-key-add-key-based-replacements "SPC v" "expand region")
 
 ;;; init.el ends here
 (custom-set-variables
