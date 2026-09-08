@@ -32,7 +32,7 @@
 ;;   §20  Markdown  (markdown-mode + gfm, SPC m / ,, lazy)
 ;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC o, lazy)
 ;;   §22  Update  (float latest, SPC f e U pull+rebuild)
-;;   §23  Web  (built-in eww + elfeed, SPC a w, lazy)
+;;   §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
 ;; =====================================================================
 
 
@@ -138,6 +138,14 @@
 
 ;; 2c. Line wrapping — visual-line wraps long lines without hard newline.
 (global-visual-line-mode 1)
+
+;; 2c2. Line numbers — absolute gutter in code buffers only.
+;;      Built-in display-line-numbers (native C, faster than linum/nlinum).
+;;      prog-mode-hook covers .el/.py + all derived code modes;
+;;      text/org/md stay clean.
+(setq display-line-numbers-type 'absolute
+      display-line-numbers-width-start t)
+(add-hook 'prog-mode-hook #'display-line-numbers-mode)
 
 ;; 2d. GUI chrome — hard-disable menu/tool/scroll bars even in GUI frames.
 ;;     nano-defaults enables them; this overrides unconditionally and also
@@ -450,7 +458,7 @@ Bound to SPC q q."
 (define-key winum-keymap (kbd "M-9") 'winum-select-window-9)
 
 ;; 6b. Modeline sections — Spacemacs blocks, bottom bar only
-;;     Layout: [N] [RO/RW/**] filename (detail) ... position <workspace>
+;;     Layout: [N] [RO/RW/**] filename (detail) ... position <workspace> %p
 ;;     Redefines `nano-modeline-compose' (same signature, so every mode
 ;;     benefits) instead of patching nano source.  Single auto-named tab
 ;;     tracks the buffer name, which used to render `<init.el> ... init.el'
@@ -484,13 +492,20 @@ which duplicated the filename in the modeline."
       (when (and name (not (string-empty-p name)))
         (propertize (format " <%s> " name) 'face 'nano-face-header-salient)))))
 
+;; Scroll percent — built-in %p scrollbar analog (Top / NN% / Bot / All).
+;; Same pattern as upstream secondary ("%l:%c"): evaluated per redisplay
+;; inside :eval, in window buffer context.
+(defun nano/modeline-scroll-percent ()
+  "Return scroll percent string for current buffer/window."
+  (format-mode-line "%p"))
+
 ;; Drop the old status-prefix advice on reload; the redefinition below
 ;; renders winum + workspace as their own blocks instead.
 (advice-remove 'nano-modeline-compose 'nano-winum-prefix)
 
 (with-eval-after-load 'nano-modeline
   (defun nano-modeline-compose (status name primary secondary)
-    "Spacemacs-block modeline: winum, RO/RW/**, filename, far-right workspace."
+    "Spacemacs-block modeline: winum, RO/RW/**, filename, far-right workspace + scroll percent."
     (let* ((char-width    (window-font-width nil 'mode-line))
            (space-up       +0.15)
            (space-down     -0.20)
@@ -522,10 +537,14 @@ which duplicated the filename in the modeline."
                   (propertize (concat " " name " ") 'face 'nano-face-header-strong)
                   (propertize primary 'face 'nano-face-header-default
                               'display `(raise ,space-up))))
-           (right (concat secondary
-                          (propertize " " 'face 'nano-face-header-default
-                                      'display `(raise ,space-down))
-                          (or ws "")))
+            (pct (propertize (concat " " (nano/modeline-scroll-percent) " ")
+                           'face 'nano-face-header-default
+                           'display `(raise ,space-up)))
+            (right (concat secondary
+                           (propertize " " 'face 'nano-face-header-default
+                                       'display `(raise ,space-down))
+                           (or ws "")
+                           pct))
            (available-width (- (window-total-width)
                                (length head) (length right)
                                (/ (window-right-divider-width) char-width)))
@@ -930,13 +949,45 @@ With prefix ARG, pass through to `tab-bar-new-tab'."
     (magit-delta-mode +1)))
 
 ;; Evil keys in magit buffers (Spacemacs default = evil-collection
-;; scoped to magit only, not full collection).  §3 evil-want-* vars
+;; scoped to magit+elfeed only, not full collection).  §3 evil-want-* vars
 ;; already satisfy evil-collection requirements.
+;; Lazy (zero startup cost): collection builds on first magit/elfeed
+;; use via straight autoloads.  Pre-seed states NOW (cheap setqs,
+;; evil already loaded in §3) so the FIRST status buffer lands in
+;; motion, not emacs — deferring the seed until after magit loads
+;; stuck the first buffer in emacs state (SPC + j/k dead, "unusable").
+;; Keymaps are global, so late `evil-collection-init' still fixes keys
+;; in existing buffers; only the state seed is timing-sensitive.
 (straight-use-package 'evil-collection)
-(with-eval-after-load 'evil
-  (with-eval-after-load 'magit
+(dolist (m '(magit-status-mode magit-log-mode magit-diff-mode
+             magit-reflog-mode magit-refs-mode magit-revision-mode
+             magit-stash-mode magit-stashes-mode magit-cherry-mode
+             magit-process-mode git-rebase-mode
+             elfeed-search-mode elfeed-show-mode))
+  (evil-set-initial-state m (if (memq m '(elfeed-search-mode elfeed-show-mode))
+                               'normal 'motion)))
+(setq evil-collection-mode-list '(magit elfeed))
+(defvar nano/evil-collection-initialized nil
+  "Non-nil once `evil-collection-init' ran (magit/elfeed share one init).")
+(defun nano/evil-collection-ensure ()
+  "Init evil-collection once for `evil-collection-mode-list'.  Lazy entry."
+  (unless nano/evil-collection-initialized
     (when (require 'evil-collection nil t)
-      (evil-collection-init '(magit)))))
+      (evil-collection-init evil-collection-mode-list)
+      (setq nano/evil-collection-initialized t))))
+(with-eval-after-load 'magit (nano/evil-collection-ensure))
+(with-eval-after-load 'elfeed-search (nano/evil-collection-ensure))
+
+;; SPC = leader inside magit (user choice).  evil-collection-magit
+;; already moved stock SPC (diff-show-or-scroll) to S-SPC, so SPC is
+;; free — bind it explicitly per state so overriding magit-mode-map
+;; can never shadow the leader again.  No `,' major leader: Spacemacs
+;; defines none for magit-status/log/diff (only with-editor/log-select).
+(with-eval-after-load 'magit
+  (with-eval-after-load 'evil
+    (when (boundp 'magit-mode-map)
+      (evil-define-key '(normal visual motion) magit-mode-map
+        (kbd "SPC") spacemacs-leader-map))))
 
 ;; 10a. Bindings
 (define-key spacemacs-leader-map (kbd "g s") 'magit-status)
@@ -1690,6 +1741,9 @@ Skips subdirs (e.g. roam/) so agenda scans fewer files."
 ;;      Keys: SPC o a = dispatcher (pick `a' for week).
 ;;      Roam alias/tag live on SPC o A / T (§21) + `, r a' / `, r t'.
 ;;      Evil: motion state so SPC leader works, agenda keys intact.
+;;      Deliberately NOT evil-collection-org-agenda: it binds SPC to
+;;      `org-agenda-show', stealing SPC=leader (user choice).  Spacemacs
+;;      parity keys below re-bound explicitly in motion instead.
 (defun nano/org-agenda-refresh-files ()
   "Set `org-agenda-files' to top-level *.org under `nano/org-directory'.
 No-op (warn once via `nano/org-ensure-directory') when dir missing."
@@ -1713,8 +1767,73 @@ No-op (warn once via `nano/org-ensure-directory') when dir missing."
 (with-eval-after-load 'evil
   ;; Evil defaults `org-agenda-mode' to emacs state (evil-vars.el),
   ;; which hides SPC leader (bound only in normal/visual/motion).
-  ;; Motion keeps agenda keys, enables SPC.
+  ;; Motion keeps agenda keys, enables SPC.  Seed now (evil loaded)
+  ;; AND after org-agenda loads (covers load-order races), plus a
+  ;; hook fallback: any agenda buffer still in emacs (e.g. restored
+  ;; session, first-load race) drops into motion — no `i' press needed.
   (evil-set-initial-state 'org-agenda-mode 'motion))
+(with-eval-after-load 'org-agenda
+  (with-eval-after-load 'evil
+    (evil-set-initial-state 'org-agenda-mode 'motion)))
+(add-hook 'org-agenda-mode-hook
+          (lambda ()
+            (when (and (bound-and-true-p evil-mode)
+                       (eq evil-state 'emacs))
+              (evil-motion-state 1))))
+
+(with-eval-after-load 'org-agenda
+  (with-eval-after-load 'evil
+    ;; SPC = leader (user choice) in every evil state used here.
+    (evil-define-key '(normal visual motion) org-agenda-mode-map
+      (kbd "SPC") spacemacs-leader-map)
+    ;; Spacemacs evilified parity (`org/packages.el:609-638'), minus
+    ;; transient `.'.  j/k = agenda-aware line motion (not raw
+    ;; evil-next-line); M-j/k item, M-h/l earlier/later, gd grid,
+    ;; gr redo, M-RET show-and-scroll-up.
+    (evil-define-key 'motion org-agenda-mode-map
+      "j" #'org-agenda-next-line
+      "k" #'org-agenda-previous-line
+      (kbd "M-j") #'org-agenda-next-item
+      (kbd "M-k") #'org-agenda-previous-item
+      (kbd "M-h") #'org-agenda-earlier
+      (kbd "M-l") #'org-agenda-later
+      "gd" #'org-agenda-toggle-time-grid
+      "gr" #'org-agenda-redo
+      (kbd "M-RET") #'org-agenda-show-and-scroll-up)))
+
+;; Spacemacs `,/SPC m' agenda prefix (`org/packages.el:497-518',
+;; transient `.' skipped — needs transient-state dep).
+(nano/declare-major-prefix 'org-agenda-mode "d" "dates")
+(nano/declare-major-prefix 'org-agenda-mode "i" "insert")
+(nano/declare-major-prefix 'org-agenda-mode "c" "clock")
+(nano/set-leader-keys-for-major-mode 'org-agenda-mode
+                                     "a" 'org-agenda
+                                     "c" 'org-capture
+                                     "t" 'org-agenda-todo
+                                     "T" 'org-agenda-todo
+                                     "dd" 'org-agenda-deadline
+                                     "ds" 'org-agenda-schedule
+                                     "sr" 'org-agenda-refile
+                                     "ie" 'org-agenda-set-effort
+                                     "ip" 'org-agenda-priority
+                                     "it" 'org-agenda-set-tags
+                                     "Cc" 'org-agenda-clock-cancel
+                                     "Ci" 'org-agenda-clock-in
+                                     "Co" 'org-agenda-clock-out
+                                     "Cj" 'org-agenda-clock-goto)
+(which-key-add-keymap-based-replacements
+  (nano/major-mode-leader-map 'org-agenda-mode)
+  "a" "agenda" "c" "capture"
+  "t" "todo" "T" "todo"
+  "dd" "deadline" "ds" "schedule"
+  "sr" "refile"
+  "ie" "effort" "ip" "priority" "it" "tags"
+  "Cc" "clock cancel" "Ci" "clock in"
+  "Co" "clock out" "Cj" "clock goto")
+(defun nano/org-agenda-setup-major-leader ()
+  "Activate curated `,' / `SPC m' map in agenda buffers."
+  (nano/activate-major-leader-locally 'org-agenda-mode))
+(add-hook 'org-agenda-mode-hook #'nano/org-agenda-setup-major-leader)
 
 (define-key spacemacs-leader-map (kbd "o a") 'org-agenda)
 (which-key-add-key-based-replacements
@@ -2005,18 +2124,178 @@ With prefix ARG, also copy to kill-ring + clipboard."
   "SPC f e U" "update packages")
 
 ;; ---------------------------------------------------------------------
-;; §23  Web  (built-in eww + elfeed, SPC a w, lazy)
+;; §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
 ;; ---------------------------------------------------------------------
-;; Zero startup cost: no `require', straight autoloads (elfeed) +
-;; built-in autoload (eww) only.  First `SPC a w r' builds elfeed.
-;; Feeds left default (`elfeed-feeds'); configure user-local on demand.
+;; Zero startup cost: no `require', straight autoloads only.  First
+;; `SPC a w r' builds elfeed + protocol + goodies.
+;; Mirrors ~/Dropbox/scripts/spacemacs-private.el:127-254, renamed
+;; `spacemacs/' -> `nano/'.  Spacemacs elfeed layer enables goodies by
+;; default (`elfeed-enable-goodies t'), so goodies pulled here — but
+;; lightest use: header-draw only, no `elfeed-goodies/setup' split-pane.
+;; Evil via evil-collection-elfeed (normal state, pre-seeded + lazy
+;; init in §10): readonly nav (j/k/q/RET) free, SPC falls through to
+;; leader.  Spacemacs `evilified' extras below re-bound explicitly.
 (straight-use-package 'elfeed)
+(straight-use-package 'elfeed-protocol)
+(straight-use-package 'elfeed-goodies)
 
 (define-key spacemacs-leader-map (kbd "a w e") 'eww)
 (define-key spacemacs-leader-map (kbd "a w r") 'elfeed)
 (which-key-add-key-based-replacements
   "SPC a w e" "open eww"
   "SPC a w r" "open elfeed")
+
+;; 23a. Sort toggle — date (oldest first) <-> random, `K' in search.
+;;      `elfeed-sort-order' default; per-buffer vars applied by fn below.
+(setq elfeed-sort-order 'ascending)
+(defvar nano/elfeed-sort-mode 'date
+  "Active elfeed-search sort mode: `date' (oldest first) or `random'.")
+
+(defun nano/elfeed-apply-sort-mode ()
+  "Apply `nano/elfeed-sort-mode' to current elfeed-search buffer."
+  (pcase nano/elfeed-sort-mode
+    ('date
+     (setq-local elfeed-search-sort-order 'ascending)
+     (setq-local elfeed-search-sort-function nil))
+    ('random
+     (setq-local elfeed-search-sort-order 'ascending)
+     (setq-local elfeed-search-sort-function
+                 (lambda (_a _b) (eq (random 2) 0)))))
+  (elfeed-search-update :force))
+
+(defun nano/elfeed-toggle-sort-mode ()
+  "Toggle elfeed-search between date (oldest-first) and random sort."
+  (interactive nil elfeed-search-mode)
+  (setq nano/elfeed-sort-mode
+        (if (eq nano/elfeed-sort-mode 'date) 'random 'date))
+  (nano/elfeed-apply-sort-mode))
+
+(defun nano/elfeed-search-header ()
+  "elfeed-search header annotated with active sort mode."
+  (let ((label (if (eq nano/elfeed-sort-mode 'random) "RANDOM" "OLDEST")))
+    (concat (propertize (format "[%s] " label) 'face 'font-lock-warning-face)
+            (if (fboundp 'elfeed-goodies/search-header-draw)
+                (elfeed-goodies/search-header-draw)
+              (elfeed-search--header)))))
+
+(with-eval-after-load 'elfeed-search
+  (ignore-errors (require 'elfeed-goodies-search-mode))
+  (setq elfeed-search-header-function #'nano/elfeed-search-header))
+
+(with-eval-after-load 'evil
+  (with-eval-after-load 'elfeed-search
+    ;; SPC = leader (user choice).  Collection binds no SPC here, but
+    ;; bind explicitly so future upstream SPC additions can't shadow it.
+    (evil-define-key '(normal visual motion) elfeed-search-mode-map
+      (kbd "SPC") spacemacs-leader-map)
+    ;; Spacemacs search extras (`elfeed/packages.el:34-42').
+    (evil-define-key 'normal elfeed-search-mode-map
+      "c" #'elfeed-db-compact
+      "gr" #'elfeed-update
+      "gR" #'elfeed-search-update--force
+      "gu" #'elfeed-unjam
+      "o" #'elfeed-load-opml
+      "K" #'nano/elfeed-toggle-sort-mode)
+    ;; Spacemacs visual extras (`packages.el:49-53').
+    (evil-define-key 'visual elfeed-search-mode-map
+      "+" #'elfeed-search-tag-all
+      "-" #'elfeed-search-untag-all
+      "b" #'elfeed-search-browse-url
+      "y" #'elfeed-search-yank)))
+
+(with-eval-after-load 'evil
+  (with-eval-after-load 'elfeed-show
+    (evil-define-key '(normal visual motion) elfeed-show-mode-map
+      (kbd "SPC") spacemacs-leader-map)
+    ;; Spacemacs show extras (`packages.el:34-42').
+    (evil-define-key 'normal elfeed-show-mode-map
+      (kbd "C-j") #'elfeed-show-next
+      (kbd "C-k") #'elfeed-show-prev)
+    ;; Goodies ace-link (`packages.el:60-61'), after show map exists.
+    (with-eval-after-load 'elfeed-goodies
+      (evil-define-key 'normal elfeed-show-mode-map
+        "o" #'elfeed-goodies/show-ace-link))))
+
+;; 23b. ttrss via elfeed-protocol — hardcoded per user choice.
+;;      Setqs cheap at startup; enable deferred until protocol loads.
+;;      Secret lives in gitignored var/ttrss-pass (chmod 600, no newline),
+;;      injected via :password-file — never in repo.
+(setq elfeed-protocol-ttrss-maxsize 200)
+(setq elfeed-protocol-ttrss-fetch-category-as-tag t)
+(setq elfeed-feeds `(("ttrss+http://admin@grex-bravo:181"
+                      :password-file ,(locate-user-emacs-file "var/ttrss-pass"))))
+
+(with-eval-after-load 'elfeed
+  (with-eval-after-load 'elfeed-protocol
+    (elfeed-protocol-enable)))
+
+;; 23c. ttrss read/star/publish sync for existing entries.
+;;      Protocol only reconciles headlines returned during update (new
+;;      ids); state changed elsewhere never reaches downloaded entries.
+;;      Pull current state for every local entry, re-apply tags via
+;;      `elfeed-protocol-ttrss--parse-entries' (idempotent).  Runtime-only
+;;      internal calls, so safe under lazy load.
+(with-eval-after-load 'elfeed-protocol
+  (require 'cl-lib)
+  (defun elfeed-protocol-ttrss--existing-ids (host-url)
+    "Return ttrss article ids of existing local elfeed entries.
+HOST-URL is the ttrss host."
+    (let* ((proto-id (elfeed-protocol-ttrss-id host-url))
+           (ids nil))
+      (elfeed-db-visit (entry)
+        (when (equal (elfeed-protocol-entry-protocol-id entry) proto-id)
+          (let ((id (elfeed-meta entry :id)))
+            (when (and id (not (memq id ids)))
+              (push id ids)))))
+      (nreverse ids)))
+
+  (defun elfeed-protocol-ttrss--sync-state-batch (host-url ids batches)
+    "Sync state for one IDS chunk, then recurse on BATCHES."
+    (let* ((data-list `(("op" . "getArticle")
+                        ("sid" . ,elfeed-protocol-ttrss-sid)
+                        ("article_id" .
+                         ,(apply #'elfeed-protocol-join-ids-to-str "," ids)))))
+      (elfeed-protocol-ttrss-with-fetch
+        host-url "POST" (json-encode-alist data-list)
+        (elfeed-protocol-ttrss--parse-entries host-url content nil 'update)
+        (if batches
+            (funcall #'elfeed-protocol-ttrss--sync-state-batch
+                     host-url (car batches) (cdr batches))
+          (elfeed-log 'debug "elfeed-protocol-ttrss: existing state sync done")))))
+
+  (defun elfeed-protocol-ttrss--split-ids (ids size)
+    "Split integer list IDS into sublists of at most SIZE elements."
+    (let ((result nil))
+      (while ids
+        (push (cl-subseq ids 0 (min size (length ids))) result)
+        (setq ids (nthcdr size ids)))
+      (nreverse result)))
+
+  (defun elfeed-protocol-ttrss-sync-read-state (host-url)
+    "Sync read/unread/star/publish state for existing elfeed entries.
+HOST-URL is ttrss host or protocol feed url."
+    (interactive (list (elfeed-protocol-url
+                        (completing-read "Protocol Feed: " (elfeed-protocol-feed-list)))))
+    (let* ((host-url (elfeed-protocol-host-url host-url))
+           (proto-id (elfeed-protocol-ttrss-id host-url)))
+      (elfeed-protocol-ttrss-fetch-prepare
+        host-url
+        (let* ((ids (elfeed-protocol-ttrss--existing-ids host-url))
+               (batches (elfeed-protocol-ttrss--split-ids ids 200)))
+          (when ids
+            (elfeed-log 'debug
+                        "elfeed-protocol-ttrss: syncing state of %d existing entries (in %d batches)"
+                        (length ids) (length batches))
+            (funcall #'elfeed-protocol-ttrss--sync-state-batch
+                     host-url (car batches) (cdr batches)))))))
+
+  (defun elfeed-protocol-ttrss-sync-read-state-hook (host-url)
+    "Sync existing-entry state after ttrss update.  For `elfeed-update-hooks'."
+    (let ((proto-id (elfeed-protocol-ttrss-id host-url)))
+      (when (and host-url (elfeed-protocol-meta-feed proto-id))
+        (elfeed-protocol-ttrss-sync-read-state host-url))))
+
+  (add-hook 'elfeed-update-hooks #'elfeed-protocol-ttrss-sync-read-state-hook))
 
 ;;; init.el ends here
 (custom-set-variables
