@@ -34,6 +34,7 @@
 ;;   §22  Update  (float latest, SPC f e U pull+rebuild)
 ;;   §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
 ;;   §24  Select  (expand-region, SPC v, lazy)
+;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
 ;; =====================================================================
 
 
@@ -305,6 +306,94 @@ Creates parent dirs after confirm.  Errors when buffer visits no file."
           (recentf-remove-if-non-kept old)))
       (message "Renamed '%s' to '%s'" old-short (file-name-nondirectory new)))))
 
+;; 5a2. Yank/copy  (SPC f y) — Spacemacs parity, zero-dep.
+;;      7 leaves: path, dir, name, base, buffer, path+line, path+line+col.
+;;      `kill-new' + CLIPBOARD + echo, same pattern as §15b/§19.
+;;      Paths expanded via `file-truename'.  `y y' falls back to dired
+;;      filename under cursor, else listed dir path.
+(defun nano/yank--file-path ()
+  "Expanded file path of current buffer, or nil when no file."
+  (when-let ((f (buffer-file-name)))
+    (file-truename f)))
+
+(defun nano/yank--file-path-with-line ()
+  "Expanded file path plus `:LINE', or nil when no file."
+  (when-let ((f (nano/yank--file-path)))
+    (concat f ":" (number-to-string (line-number-at-pos)))))
+
+(defun nano/yank--copy (s)
+  "Push S to kill-ring + clipboard, echo it."
+  (kill-new s)
+  (when (fboundp 'gui-set-selection)
+    (ignore-errors (gui-set-selection 'CLIPBOARD s)))
+  (message "%s" s))
+
+(defun nano/copy-file-path ()
+  "Copy + show file path.  In dired, file under cursor else listed dir.  SPC f y y."
+  (interactive)
+  (if-let ((p (or (nano/yank--file-path)
+                  (and (derived-mode-p 'dired-mode)
+                       (dired-get-filename nil t)))))
+      (nano/yank--copy p)
+    (user-error "Current buffer is not visiting a file")))
+
+(defun nano/copy-directory-path ()
+  "Copy + show `default-directory' truename.  SPC f y d."
+  (interactive)
+  (nano/yank--copy (file-truename default-directory)))
+
+(defun nano/copy-file-name ()
+  "Copy + show file nondirectory.  SPC f y n."
+  (interactive)
+  (if-let ((p (nano/yank--file-path)))
+      (nano/yank--copy (file-name-nondirectory p))
+    (user-error "Current buffer is not visiting a file")))
+
+(defun nano/copy-file-name-base ()
+  "Copy + show file name sans extension.  SPC f y N."
+  (interactive)
+  (if-let ((p (nano/yank--file-path)))
+      (nano/yank--copy (file-name-base p))
+    (user-error "Current buffer is not visiting a file")))
+
+(defun nano/copy-buffer-name ()
+  "Copy + show buffer name, even non-file.  SPC f y b."
+  (interactive)
+  (nano/yank--copy (buffer-name)))
+
+(defun nano/copy-file-path-with-line ()
+  "Copy + show path `:LINE'.  SPC f y l."
+  (interactive)
+  (if-let ((p (nano/yank--file-path-with-line)))
+      (nano/yank--copy p)
+    (user-error "Current buffer is not visiting a file")))
+
+(defun nano/copy-file-path-with-line-column ()
+  "Copy + show path `:LINE:COL'.  SPC f y c.  Respects zero-based flag."
+  (interactive)
+  (if-let ((p (nano/yank--file-path-with-line)))
+      (nano/yank--copy
+       (format "%s:%s" p (+ (current-column)
+                            (if (bound-and-true-p column-number-indicator-zero-based) 0 1))))
+    (user-error "Current buffer is not visiting a file")))
+
+(define-key spacemacs-leader-map (kbd "f y y") 'nano/copy-file-path)
+(define-key spacemacs-leader-map (kbd "f y d") 'nano/copy-directory-path)
+(define-key spacemacs-leader-map (kbd "f y n") 'nano/copy-file-name)
+(define-key spacemacs-leader-map (kbd "f y N") 'nano/copy-file-name-base)
+(define-key spacemacs-leader-map (kbd "f y b") 'nano/copy-buffer-name)
+(define-key spacemacs-leader-map (kbd "f y l") 'nano/copy-file-path-with-line)
+(define-key spacemacs-leader-map (kbd "f y c") 'nano/copy-file-path-with-line-column)
+(which-key-add-key-based-replacements
+  "SPC f y" "yank/copy"
+  "SPC f y y" "file path"
+  "SPC f y d" "directory path"
+  "SPC f y n" "file name"
+  "SPC f y N" "file name base"
+  "SPC f y b" "buffer name"
+  "SPC f y l" "path with line"
+  "SPC f y c" "path with line+col")
+
 ;; 5b. Buffer  (SPC b)
 (define-key spacemacs-leader-map (kbd "TAB") 'mode-line-other-buffer)
 (define-key spacemacs-leader-map (kbd "b b") 'switch-to-buffer)
@@ -563,7 +652,14 @@ which duplicated the filename in the modeline."
                   (propertize (concat " " name " ") 'face 'nano-face-header-strong)
                   (propertize primary 'face 'nano-face-header-default
                               'display `(raise ,space-up))))
-            (pct (propertize (concat " " (nano/modeline-scroll-percent) " ")
+            (pct-text (concat " " (nano/modeline-scroll-percent) " "))
+            (pct-display (propertize pct-text
+                           'face 'nano-face-header-default
+                           'display `(raise ,space-up)))
+            ;; Literal % must be doubled for mode-line: :eval output is
+            ;; %-expanded, so single trailing % in "NN%" gets eaten.
+            ;; Escape after width math so filler count uses display width.
+            (pct (propertize (string-replace "%" "%%" pct-text)
                            'face 'nano-face-header-default
                            'display `(raise ,space-up)))
             (right (concat secondary
@@ -571,9 +667,14 @@ which duplicated the filename in the modeline."
                                        'display `(raise ,space-down))
                            (or ws "")
                            pct))
-           (available-width (- (window-total-width)
-                               (length head) (length right)
-                               (/ (window-right-divider-width) char-width)))
+            (right-for-width (concat secondary
+                                     (propertize " " 'face 'nano-face-header-default
+                                                 'display `(raise ,space-down))
+                                     (or ws "")
+                                     pct-display))
+            (available-width (- (window-total-width)
+                                (length head) (length right-for-width)
+                                (/ (window-right-divider-width) char-width)))
            (available-width (max 1 available-width)))
       (concat head
               (propertize (make-string available-width ?\ )
@@ -2334,8 +2435,8 @@ With prefix ARG, also copy to kill-ring + clipboard."
 (define-key spacemacs-leader-map (kbd "a w e") 'eww)
 (define-key spacemacs-leader-map (kbd "a w r") 'elfeed)
 (which-key-add-key-based-replacements
-  "SPC a w e" "open eww"
-  "SPC a w r" "open elfeed")
+  "SPC a w e" "eww"
+  "SPC a w r" "elfeed")
 
 ;; 23a. Sort toggle — date (oldest first) <-> random, `K' in search.
 ;;      `elfeed-sort-order' default; per-buffer vars applied by fn below.
@@ -2532,6 +2633,33 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 (define-key spacemacs-leader-map (kbd "v") 'er/expand-region)
 (which-key-add-key-based-replacements "SPC v" "expand region")
 
+;; ---------------------------------------------------------------------
+;; §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
+;; ---------------------------------------------------------------------
+;; Spacemacs parity: `~/.spacemacs:162' lists `keepass-mode' in
+;; `dotspacemacs-additional-packages', `:683' sets
+;; `(evil-set-initial-state 'keepass-mode 'evilified)' — no layer,
+;; no config.  Same here, minimal.
+;; Deps: external `keepassxc-cli' binary (already /usr/bin), master
+;; password prompted per open (`keepass-mode-ask-password').
+;; Zero startup cost: no `require', straight autoloads only.
+;; `auto-mode-alist' set here: upstream adds it top-level
+;; (keepass-mode.el:116-117) which only runs on load, so without
+;; this `.kdbx' would not trigger the mode on first open.
+(straight-use-package '(keepass-mode :type git :host github :repo "ifosch/keepass-mode"))
+
+(add-to-list 'auto-mode-alist '("\\.kdbx\\'" . keepass-mode))
+(add-to-list 'auto-mode-alist '("\\.kdb\\'" . keepass-mode))
+
+;; Evilified = emacs bindings + SPC leader.  No evilified state here,
+;; so seed emacs (native RET/backspace/u/b/c map intact) and bind SPC
+;; to leader explicitly in that state.
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'keepass-mode 'emacs)
+  (with-eval-after-load 'keepass-mode
+    (evil-define-key 'emacs keepass-mode-map
+      (kbd "SPC") spacemacs-leader-map)))
+
 ;;; init.el ends here
 (custom-set-variables
  ;; custom-set-variables was added by Custom.
@@ -2554,3 +2682,4 @@ unconditionally, so a raw use yields a doubled id and silently skips."
  ;; Your init file should contain only one such instance.
  ;; If there is more than one, they won't work right.
  )
+(put 'erase-buffer 'disabled nil)
