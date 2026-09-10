@@ -248,11 +248,13 @@
 (define-key spacemacs-leader-map (kbd ":") 'execute-extended-command)   ; SPC :   → M-x (Spacemacs compat)
 (define-key spacemacs-leader-map (kbd "f f") 'find-file)
 (define-key spacemacs-leader-map (kbd "f s") 'save-buffer)
-(define-key spacemacs-leader-map (kbd "f S") 'save-some-buffers)
+(define-key spacemacs-leader-map (kbd "f S") 'evil-write-all) ; Spacemacs parity (:wa, silent, no prompt)
 (define-key spacemacs-leader-map (kbd "f r") 'recentf-open-files)
 (define-key spacemacs-leader-map (kbd "f D") 'nano/delete-current-buffer-file)
 (define-key spacemacs-leader-map (kbd "f R") 'nano/rename-current-buffer-file)
 (which-key-add-key-based-replacements
+  "SPC f s" "save file"
+  "SPC f S" "save all"
   "SPC f D" "delete file"
   "SPC f R" "rename file")
 
@@ -579,13 +581,40 @@ Bound to SPC q q."
 ;;     tracks the buffer name, which used to render `<init.el> ... init.el'
 ;;     (workspace + file duplicated); workspace now lives far-right and the
 ;;     initial tab is named "main" in §9, so no adjacency dup.
+(defface nano-face-header-active nil
+  "Green highlight for selected window modeline blocks."
+  :group 'nano)
+
+(defun nano/apply-modeline-active-face ()
+  "Paint `nano-face-header-active' green per theme.  Re-applied after refresh."
+  (if (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
+      (set-face-attribute 'nano-face-header-active nil
+                          :foreground "#FFFFFF" :background "#2F9E44"
+                          :box `(:line-width 1 :color ,nano-color-background :style nil))
+    (set-face-attribute 'nano-face-header-active nil
+                        :foreground "#2E3440" :background "#A3BE8C"
+                        :box `(:line-width 1 :color ,nano-color-background :style nil))))
+
+(nano/apply-modeline-active-face)
+(when (fboundp 'nano-refresh-theme)
+  (advice-add 'nano-refresh-theme :after #'nano/apply-modeline-active-face))
+
+(defun nano/modeline-selected-p ()
+  "Non-nil when rendered modeline belongs to selected window."
+  (if (fboundp 'mode-line-window-selected-p)
+      (mode-line-window-selected-p)
+    t))
+
 (defun nano/winum-number-string ()
   "Return propertized window number block for current window, or nil."
   (when (and (bound-and-true-p winum-mode)
              (fboundp 'winum-get-number))
     (let ((n (ignore-errors (winum-get-number (selected-window)))))
       (when n
-        (propertize (format " %d " n) 'face 'nano-face-header-strong)))))
+        (propertize (format " %d " n)
+                    'face (if (nano/modeline-selected-p)
+                              'nano-face-header-active
+                            'nano-face-header-strong))))))
 
 (defun nano/workspace-name-string ()
   "Return propertized current tab-bar workspace block, or nil.
@@ -626,17 +655,19 @@ which duplicated the filename in the modeline."
            (space-down     -0.20)
            (winum (nano/winum-number-string))
            (ws    (nano/workspace-name-string))
-           ;; Status block — same RO/**/RW face mapping as upstream.
+           (active (nano/modeline-selected-p))
+           ;; RO/RW both faded grey, ** critical.
            (prefix (let* ((code (cond ((string-suffix-p "RO" status) "RO")
                                       ((string-suffix-p "**" status) "**")
                                       ((string-suffix-p "RW" status) "RW")
                                       (t nil)))
-                          (face (if (window-dedicated-p)
-                                    'nano-face-header-popout
-                                  (cond ((string= code "RO") 'nano-face-header-popout)
-                                        ((string= code "**") 'nano-face-header-critical)
-                                        ((string= code "RW") 'nano-face-header-faded)
-                                        (t 'nano-face-header-popout))))
+                          (face (if (string= code "RO")
+                                    'nano-face-header-faded
+                                  (if (window-dedicated-p)
+                                      'nano-face-header-popout
+                                    (cond ((string= code "**") 'nano-face-header-critical)
+                                          ((string= code "RW") 'nano-face-header-faded)
+                                          (t 'nano-face-header-popout)))))
                           (text (if code
                                     (let ((base (substring status 0 (- (length status) (length code)))))
                                       (concat (if (string= base "") " " base)
@@ -648,8 +679,11 @@ which duplicated the filename in the modeline."
            (head (concat
                   (or winum "")
                   sep
-                  prefix
-                  (propertize (concat " " name " ") 'face 'nano-face-header-strong)
+                   prefix
+                   (propertize (concat " " name " ")
+                               'face (if active
+                                         'nano-face-header-active
+                                       'nano-face-header-strong))
                   (propertize primary 'face 'nano-face-header-default
                               'display `(raise ,space-up))))
             (pct-text (concat " " (nano/modeline-scroll-percent) " "))
@@ -1679,7 +1713,7 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 ;; + babel execute (inline src_lang{} + #+BEGIN_SRC).
 ;; Mirrors layers/+emacs/org/packages.el:346-360, trimmed to
 ;; execute/navigate subset (no tangle/sessions/lob).
-;; NOTE: more org bindings appended later — §18c (todo/open/random),
+;; NOTE: more org bindings appended later — §18c (todo/text/random),
 ;; §21b (roam).  Edit those too for full `,' map.
 (nano/declare-major-prefix 'org-mode "d" "dates")
 (nano/declare-major-prefix 'org-mode "s" "subtree")
@@ -1967,13 +2001,33 @@ Skips subdirs (e.g. roam/) so agenda scans fewer files."
         org-edit-src-content-indentation 0))
 
 ;; 18c. Curated leader additions (map created in §16c, hook already active).
+;;      `, x' text menu mirrors Spacemacs layers/+emacs/org/packages.el:394-401
+;;      (built-in `org-emphasize', zero dep).  `, xo' replaces old `, o'.
+(defun nano/org-bold () "Bold region/word via `org-emphasize' *.  `, xb'." (interactive) (org-emphasize ?*))
+(defun nano/org-code () "Code region/word via `org-emphasize' ~.  `, xc'." (interactive) (org-emphasize ?~))
+(defun nano/org-italic () "Italic region/word via `org-emphasize' /.  `, xi'." (interactive) (org-emphasize ?/))
+(defun nano/org-clear-emphasis () "Clear emphasis on region.  `, xr'." (interactive) (org-emphasize ?\s))
+(defun nano/org-strike-through () "Strike region/word via `org-emphasize' +.  `, xs'." (interactive) (org-emphasize ?+))
+(defun nano/org-underline () "Underline region/word via `org-emphasize' _.  `, xu'." (interactive) (org-emphasize ?_))
+(defun nano/org-verbatim () "Verbatim region/word via `org-emphasize' =.  `, xv'." (interactive) (org-emphasize ?=))
+(nano/declare-major-prefix 'org-mode "x" "text")
 (nano/set-leader-keys-for-major-mode 'org-mode
                                      "t" 'org-todo           ; cycle TODO->NEXT->DONE
-                                     "o" 'org-open-at-point  ; explicit open, fallback when RET shadowed
-                                     "R" 'nano/org-random-current-buffer) ; random headline, current buffer only
+                                     "R" 'nano/org-random-current-buffer ; random headline, current buffer only
+                                     "xb" 'nano/org-bold
+                                     "xc" 'nano/org-code
+                                     "xi" 'nano/org-italic
+                                     "xo" 'org-open-at-point ; moved from `, o'
+                                     "xr" 'nano/org-clear-emphasis
+                                     "xs" 'nano/org-strike-through
+                                     "xu" 'nano/org-underline
+                                     "xv" 'nano/org-verbatim)
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'org-mode)
-  "t" "todo cycle" "o" "open link" "R" "random note (buffer)")
+  "t" "todo cycle" "R" "random note (buffer)"
+  "xb" "bold" "xc" "code" "xi" "italic" "xo" "open link"
+  "xr" "clear emphasis" "xs" "strike-through"
+  "xu" "underline" "xv" "verbatim")
 
 ;; 18d. Random note — tasshin/org-randomnote (lazy, zero startup cost).
 ;;      Deps: dash + f (+ s via f), all lazy via straight autoloads.
@@ -2423,8 +2477,11 @@ With prefix ARG, also copy to kill-ring + clipboard."
 ;; `SPC a w r' builds elfeed + protocol + goodies.
 ;; Mirrors ~/Dropbox/scripts/spacemacs-private.el:127-254, renamed
 ;; `spacemacs/' -> `nano/'.  Spacemacs elfeed layer enables goodies by
-;; default (`elfeed-enable-goodies t'), so goodies pulled here — but
-;; lightest use: header-draw only, no `elfeed-goodies/setup' split-pane.
+;; default (`elfeed-enable-goodies t'): entry layout Tags|Title
+;; (no feed, no date) + header totals + split-pane entry view.
+;; Entry/header rendering via nano/ fns derived from goodies draw fns (powerline vendored as
+;; goodies dep); split pane via built-in `display-buffer' (no popwin,
+;; perf-first per Principles) instead of goodies/popwin switch-pane.
 ;; Evil via evil-collection-elfeed (normal state, pre-seeded + lazy
 ;; init in §10): readonly nav (j/k/q/RET) free, SPC falls through to
 ;; leader.  Spacemacs `evilified' extras below re-bound explicitly.
@@ -2454,27 +2511,96 @@ With prefix ARG, also copy to kill-ring + clipboard."
      (setq-local elfeed-search-sort-order 'ascending)
      (setq-local elfeed-search-sort-function
                  (lambda (_a _b) (eq (random 2) 0)))))
-  (elfeed-search-update :force))
+  (elfeed-search-update :force)
+  (force-mode-line-update t))
 
 (defun nano/elfeed-toggle-sort-mode ()
   "Toggle elfeed-search between date (oldest-first) and random sort."
   (interactive nil elfeed-search-mode)
   (setq nano/elfeed-sort-mode
         (if (eq nano/elfeed-sort-mode 'date) 'random 'date))
-  (nano/elfeed-apply-sort-mode))
+  (nano/elfeed-apply-sort-mode)
+  (message "elfeed sort: %s" nano/elfeed-sort-mode))
+
+(defun nano/elfeed-sort-label ()
+  "Short sort-mode label for header/modeline: OLDEST or RANDOM."
+  (if (eq nano/elfeed-sort-mode 'random) "RANDOM" "OLDEST"))
+
+(defun nano/elfeed-entry-line-draw (entry)
+  "Print ENTRY as tags + title only (no feed column).
+Same wide/narrow behavior as `elfeed-goodies/entry-line-draw',
+minus the feed source column so titles gain its width."
+  (let* ((title (or (elfeed-meta entry :title) (elfeed-entry-title entry) ""))
+         (title-faces (elfeed-search--faces (elfeed-entry-tags entry)))
+         (tags (mapcar #'symbol-name (elfeed-entry-tags entry)))
+         (tags-str (concat "[" (mapconcat 'identity tags ",") "]"))
+         (title-width (- (window-width) elfeed-goodies/tag-column-width 4))
+         (tag-column (elfeed-format-column
+                      tags-str (elfeed-clamp (length tags-str)
+                                             elfeed-goodies/tag-column-width
+                                             elfeed-goodies/tag-column-width)
+                      :left)))
+    (if (>= (window-width) (* (frame-width) elfeed-goodies/wide-threshold))
+        (progn
+          (insert (propertize tag-column 'face 'elfeed-search-tag-face) " ")
+          (insert (propertize title 'face title-faces 'kbd-help title)))
+      (insert (propertize title 'face title-faces 'kbd-help title)))))
+
+(defun nano/elfeed-search-header-draw ()
+  "Tags|Subject powerline header, no feed column.  Narrow keeps goodies tight layout."
+  (if (zerop (elfeed-db-last-update))
+      (elfeed-search--intro-header)
+    (let* ((separator-left (intern (format "powerline-%s-%s"
+                                           elfeed-goodies/powerline-default-separator
+                                           (car powerline-default-separator-dir))))
+           (separator-right (intern (format "powerline-%s-%s"
+                                            elfeed-goodies/powerline-default-separator
+                                            (cdr powerline-default-separator-dir))))
+           (db-time (seconds-to-time (elfeed-db-last-update)))
+           (stats (-elfeed/feed-stats))
+           (search-filter (cond (elfeed-search-filter-active "")
+                                (elfeed-search-filter elfeed-search-filter)
+                                (""))))
+      (if (>= (window-width) (* (frame-width) elfeed-goodies/wide-threshold))
+          (let* ((update (format-time-string "%Y-%m-%d %H:%M:%S %z" db-time))
+                 (lhs (list
+                       (powerline-raw (-pad-string-to "Tags" (- elfeed-goodies/tag-column-width 6)) 'powerline-active2 'l)
+                       (funcall separator-left 'powerline-active2 'mode-line)
+                       (powerline-raw "Subject" 'mode-line 'l)))
+                 (rhs (search-header/rhs separator-left separator-right search-filter stats update)))
+            (concat (powerline-render lhs)
+                    (powerline-fill 'mode-line (powerline-width rhs))
+                    (powerline-render rhs)))
+        (search-header/draw-tight separator-left separator-right search-filter stats db-time)))))
 
 (defun nano/elfeed-search-header ()
   "elfeed-search header annotated with active sort mode."
-  (let ((label (if (eq nano/elfeed-sort-mode 'random) "RANDOM" "OLDEST")))
-    (concat (propertize (format "[%s] " label) 'face 'font-lock-warning-face)
-            (if (fboundp 'elfeed-goodies/search-header-draw)
-                (elfeed-goodies/search-header-draw)
-              (elfeed-search--header)))))
+  (concat (propertize (format "[%s] " (nano/elfeed-sort-label)) 'face 'font-lock-warning-face)
+          (if (fboundp 'nano/elfeed-search-header-draw)
+              (nano/elfeed-search-header-draw)
+            (elfeed-search--header))))
 
 (with-eval-after-load 'elfeed-search
-  (unless (require 'elfeed-goodies-search-mode nil t)
+  (when (require 'elfeed-goodies-search-mode nil t)
+    ;; Entry layout Tags|Title, no feed column.  Narrow windows fall
+    ;; back to title-only per wide-threshold.
+    (setq elfeed-search-print-entry-function #'nano/elfeed-entry-line-draw)
+    (elfeed-search-update :force))
+  (unless (featurep 'elfeed-goodies-search-mode)
     (message "nano: elfeed-goodies-search-mode missing, using built-in header"))
   (setq elfeed-search-header-function #'nano/elfeed-search-header))
+
+;; Bottom modeline (§6b bar) sort indicator — overrides vendored
+;; `nano-modeline-elfeed-search-mode' (nano-modeline.el:123) which
+;; shows no sort state.  Top powerline header keeps its own [label]
+;; prefix as fallback; this is the visible one on the bottom bar.
+(with-eval-after-load 'nano-modeline
+  (defun nano-modeline-elfeed-search-mode ()
+    (nano-modeline-compose (nano-modeline-status)
+                           "Elfeed"
+                           (concat "(" (nano/elfeed-sort-label) ") "
+                                   "(" (elfeed-search--header) ")")
+                           "")))
 
 (with-eval-after-load 'evil
   (with-eval-after-load 'elfeed-search
@@ -2483,7 +2609,12 @@ With prefix ARG, also copy to kill-ring + clipboard."
     (evil-define-key '(normal visual motion) elfeed-search-mode-map
       (kbd "SPC") spacemacs-leader-map)
     ;; Spacemacs search extras (`elfeed/packages.el:34-42').
+    ;; `b' browse + `r' mark-read re-bound explicitly: evil normal
+    ;; `b' (backward-word) / `r' (replace) shadow native search keys,
+    ;; and evil-collection-elfeed binds neither.
     (evil-define-key 'normal elfeed-search-mode-map
+      "b" #'elfeed-search-browse-url
+      "r" #'elfeed-search-untag-unread
       "c" #'elfeed-db-compact
       "gr" #'elfeed-update
       "gR" #'elfeed-search-update--force
@@ -2497,14 +2628,42 @@ With prefix ARG, also copy to kill-ring + clipboard."
       "b" #'elfeed-search-browse-url
       "y" #'elfeed-search-yank)))
 
+;; 23a2. Split entry view — RET keeps search visible (Spacemacs parity).
+;;      Built-in `display-buffer' right split, no popwin dep.
+;;      `elfeed-show-entry' routes through `elfeed-show-entry-switch',
+;;      so RET (`elfeed-search-show-entry') lands in the split.
+(defun nano/elfeed-show-split (buff)
+  "Display entry BUFF in right split, keeping *elfeed-search* visible."
+  (let ((win (display-buffer-in-direction buff '((direction . right)))))
+    (when (window-live-p win)
+      (select-window win))))
+
+(defun nano/elfeed-show-quit ()
+  "Kill entry buffer, delete its window, refocus search."
+  (interactive)
+  (let ((search (get-buffer "*elfeed-search*")))
+    (kill-buffer (current-buffer))
+    (delete-window)
+    (when-let ((win (get-buffer-window search)))
+      (select-window win))))
+
+(with-eval-after-load 'elfeed-show
+  (setq elfeed-show-entry-switch #'nano/elfeed-show-split
+        elfeed-show-entry-delete #'nano/elfeed-show-quit))
+
 (with-eval-after-load 'evil
   (with-eval-after-load 'elfeed-show
     (evil-define-key '(normal visual motion) elfeed-show-mode-map
       (kbd "SPC") spacemacs-leader-map)
     ;; Spacemacs show extras (`packages.el:34-42').
+    ;; Native next/prev already route through switch/delete above,
+    ;; so they stay in the split.  `q' kills + closes split.
     (evil-define-key 'normal elfeed-show-mode-map
       (kbd "C-j") #'elfeed-show-next
-      (kbd "C-k") #'elfeed-show-prev)
+      (kbd "C-k") #'elfeed-show-prev
+      "n" #'elfeed-show-next
+      "p" #'elfeed-show-prev
+      "q" #'nano/elfeed-show-quit)
     ;; Goodies ace-link (`packages.el:60-61'), after show map exists.
     (with-eval-after-load 'elfeed-goodies
       (evil-define-key 'normal elfeed-show-mode-map
@@ -2651,14 +2810,36 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 (add-to-list 'auto-mode-alist '("\\.kdbx\\'" . keepass-mode))
 (add-to-list 'auto-mode-alist '("\\.kdb\\'" . keepass-mode))
 
-;; Evilified = emacs bindings + SPC leader.  No evilified state here,
-;; so seed emacs (native RET/backspace/u/b/c map intact) and bind SPC
-;; to leader explicitly in that state.
+;; Evilified = motion state + native keys re-bound over evil shadows.
+;; No evilified state in vanilla evil, so motion is the closest:
+;; read-only list like Buffer-menu-mode (evil default motion family),
+;; j/k/gg/G/C-u/C-d free, SPC leader available.  Native keepass keys
+;; shadowed by motion (`b' = backward-word, `RET' = evil-ret) are
+;; re-bound explicitly via `evil-define-key', buffer-local to
+;; `keepass-mode-map'.  `u'/`c' are free in motion but bound anyway
+;; so a future state switch can't regress them.  Seed both now (evil
+;; loaded) and after keepass-mode loads (load-order race, same pattern
+;; as org-agenda at §18d); hook fallback covers session-restore buffers
+;; still stuck in emacs.
 (with-eval-after-load 'evil
-  (evil-set-initial-state 'keepass-mode 'emacs)
-  (with-eval-after-load 'keepass-mode
-    (evil-define-key 'emacs keepass-mode-map
-      (kbd "SPC") spacemacs-leader-map)))
+  (evil-set-initial-state 'keepass-mode 'motion))
+(with-eval-after-load 'keepass-mode
+  (with-eval-after-load 'evil
+    (evil-set-initial-state 'keepass-mode 'motion)
+    (evil-define-key '(normal visual motion) keepass-mode-map
+      (kbd "SPC") spacemacs-leader-map)
+    (evil-define-key 'motion keepass-mode-map
+      (kbd "RET") 'keepass-mode-select
+      (kbd "<backspace>") 'keepass-mode-back
+      (kbd "DEL") 'keepass-mode-back
+      "u" 'keepass-mode-copy-url
+      "b" 'keepass-mode-copy-username
+      "c" 'keepass-mode-copy-password)))
+(add-hook 'keepass-mode-hook
+          (lambda ()
+            (when (and (bound-and-true-p evil-mode)
+                       (eq evil-state 'emacs))
+              (evil-motion-state 1))))
 
 ;;; init.el ends here
 (custom-set-variables
