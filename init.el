@@ -27,7 +27,7 @@
 ;;   §15 Text  (SPC x, built-in + link-hint lazy)
 ;;   §16 Major-mode leader  (, + SPC m, V0 fallback + V1 org curated)
 ;;   §17  Jump  (avy, SPC j, lazy)
-;;   §18  Org  (autolist, links, tags, todo flow, babel, agenda, random, bullets)
+;;   §18  Org  (autolist, links, tags, todo flow, babel, agenda, notify, random, bullets, present)
 ;;   §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
 ;;   §20  Markdown  (markdown-mode + gfm, SPC m / ,, lazy)
 ;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC o, lazy)
@@ -35,6 +35,7 @@
 ;;   §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
 ;;   §24  Select  (expand-region, SPC v, lazy)
 ;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
+;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
 ;; =====================================================================
 
 
@@ -123,6 +124,8 @@
 ;;      warnings suppressed in §1 — no override needed, dropped.
 (with-eval-after-load 'nano-defaults
   (setq-default major-mode 'text-mode)
+  ;; Scratch defaults to org-mode (autoloaded, no eager require).
+  (setq initial-major-mode 'org-mode)
   (when (fboundp 'temp-buffer-resize-mode)
     (temp-buffer-resize-mode 1))
   ;; Replace legacy defadvice with modern advice-add.
@@ -418,13 +421,13 @@ Creates parent dirs after confirm.  Errors when buffer visits no file."
 (defun nano/switch-to-scratch-buffer (&optional arg)
   "Switch to `*scratch*', creating it first if needed.
 With prefix ARG, open in another window.
-Fresh buffer defaults to `lisp-interaction-mode'."
+Fresh buffer defaults to `org-mode'."
   (interactive "P")
   (let ((scratch (get-buffer-create "*scratch*")))
     (with-current-buffer scratch
       (when (= (buffer-size) 0)
-        (unless (eq major-mode 'lisp-interaction-mode)
-          (lisp-interaction-mode))))
+        (unless (eq major-mode 'org-mode)
+          (org-mode))))
     (if arg
         (switch-to-buffer-other-window scratch)
       (switch-to-buffer scratch))))
@@ -2151,6 +2154,52 @@ No-op (warn once via `nano/org-ensure-directory') when dir missing."
 (which-key-add-key-based-replacements
   "SPC o a" "agenda (week)")
 
+;; 18e2. Scheduled notify — built-in appt + notifications, on-time.
+;;      Spacemacs uses org-alert cutoff 10; here warning 0 (fire at time).
+;;      SCHEDULED-only with hh:mm (`:scheduled*'); DEADLINE/timestamp
+;;      skipped per scope.  Per-item APPT_WARNTIME prop still overrides
+;;      global 0 (org standard).  Zero-dep: appt + notifications built-in.
+;;      Refresh each minute (top-level files only, cheap) + agenda/save/todo
+;;      hooks.  D-Bus fail / tty / batch falls back to echo + mode-line.
+(require 'appt)
+(setq appt-message-warning-time 0 ; on-time, not 10-early
+      appt-display-interval 1     ; minute precision
+      appt-audible nil
+      appt-display-mode-line t)
+
+(defun nano/appt-desktop-notify (min-to-app new-time msg)
+  "Desktop notify for SCHEDULED item at NEW-TIME with MSG.
+MIN-TO-APP ignored (warning 0).  D-Bus fail falls back to echo."
+  (when (and (not noninteractive)
+             (getenv "DBUS_SESSION_BUS_ADDRESS"))
+    (ignore-errors
+      (require 'notifications nil t)
+      (when (fboundp 'notifications-notify)
+        (notifications-notify :title "Org SCHEDULED"
+                              :body (format "%s: %s" new-time msg)
+                              :urgency 'normal :timeout 10000))))
+  (message "Org SCHEDULED %s: %s" new-time msg))
+
+(setq appt-disp-window-function #'nano/appt-desktop-notify
+      appt-delete-window-function #'ignore)
+
+(defun nano/org-appt-refresh ()
+  "Rebuild appt list from SCHEDULED items with time.  Silent no-op when org dir missing."
+  (when (nano/org-ensure-directory)
+    (nano/org-agenda-refresh-files)
+    (when (or (featurep 'org-agenda) (require 'org-agenda nil t))
+      (ignore-errors (org-agenda-to-appt t nil :scheduled*)))))
+
+(unless noninteractive
+  (appt-activate 1)
+  (run-at-time nil 60 #'nano/org-appt-refresh)
+  (add-hook 'window-setup-hook #'nano/org-appt-refresh)
+  (add-hook 'org-agenda-finalize-hook #'nano/org-appt-refresh)
+  (add-hook 'org-after-todo-state-change-hook #'nano/org-appt-refresh)
+  (add-hook 'org-mode-hook
+            (lambda ()
+              (add-hook 'after-save-hook #'nano/org-appt-refresh nil t))))
+
 ;; 18f. Bullets — zero-dep Spacemacs parity (no org-superstar fetch).
 ;;      File keeps `*'; display composes leading stars per heading:
 ;;      first N-1 stars -> space (indent), last star -> bullet cycled
@@ -2185,6 +2234,47 @@ No-op (warn once via `nano/org-ensure-directory') when dir missing."
     (font-lock-flush)))
 
 (add-hook 'org-mode-hook #'nano/org-bullets-enable)
+
+;; 18g. Presentation — rlister/org-present, `, P' parity with ~/.spacemacs:685-687.
+;;      Stock Spacemacs wires org-present command-only (`SPC SPC org-present');
+;;      user config adds `, P'.  Same here: `, P' / `SPC m P' via curated map.
+;;      Lazy: straight autoload only, zero startup cost.  Start/end hooks +
+;;      h/l/q keys mirror layers/+emacs/org/packages.el:780-806.
+(straight-use-package 'org-present)
+
+(defun nano/org-present-start ()
+  "Big text, inline images, hide cursor, read-only, evil normal."
+  (when (fboundp 'org-present-big) (org-present-big))
+  (when (fboundp 'org-display-inline-images) (org-display-inline-images))
+  (when (fboundp 'org-present-hide-cursor) (org-present-hide-cursor))
+  (when (fboundp 'org-present-read-only) (org-present-read-only))
+  (when (fboundp 'evil-normal-state) (evil-normal-state 1)))
+
+(defun nano/org-present-end ()
+  "Restore text, images, cursor, write access after quit."
+  (when (fboundp 'org-present-small) (org-present-small))
+  (when (and (fboundp 'org-remove-inline-images)
+             (not (bound-and-true-p org-startup-with-inline-images)))
+    (org-remove-inline-images))
+  (when (fboundp 'org-present-show-cursor) (org-present-show-cursor))
+  (when (fboundp 'org-present-read-write) (org-present-read-write)))
+
+(with-eval-after-load 'org-present
+  (add-hook 'org-present-mode-hook #'nano/org-present-start)
+  (add-hook 'org-present-mode-quit-hook #'nano/org-present-end)
+  (with-eval-after-load 'evil
+    (evil-define-key 'normal org-present-mode-keymap
+      "h" #'org-present-prev
+      "l" #'org-present-next
+      "q" #'org-present-quit
+      (kbd "<left>") #'org-present-prev
+      (kbd "<right>") #'org-present-next)))
+
+(nano/set-leader-keys-for-major-mode 'org-mode
+                                     "P" 'org-present)
+(which-key-add-keymap-based-replacements
+  (nano/major-mode-leader-map 'org-mode)
+  "P" "presentation")
 
 
 ;; ---------------------------------------------------------------------
@@ -2840,6 +2930,23 @@ unconditionally, so a raw use yields a doubled id and silently skips."
             (when (and (bound-and-true-p evil-mode)
                        (eq evil-state 'emacs))
               (evil-motion-state 1))))
+
+;; ---------------------------------------------------------------------
+;; §26  Animal Spirit  (local autoload, SPC a a, lazy)
+;; ---------------------------------------------------------------------
+;; Spacemacs parity: `~/.spacemacs:158-160' adds `animal-spirit' via
+;; `:fetcher file :path ~/animalspirit/emacs', `:690' binds `aa' plus
+;; `(autoload 'animal-spirit "animal-spirit")'.  Same here, minimal.
+;; Lightest path: `load-path' + `autoload', no straight clone (local
+;; live edits apply instantly, survives `straight-pull-all').
+;; Deps: built-in `transient' only (`animal-spirit.el:12').  No `require':
+;; file provides `'animalspirit' (no hyphen), so require by filename fails.
+;; Buffer sets `evil-normal-state' itself; SPC falls through to leader.
+(add-to-list 'load-path (expand-file-name "~/animalspirit/emacs"))
+(autoload 'animal-spirit "animal-spirit" nil t)
+
+(define-key spacemacs-leader-map (kbd "a a") 'animal-spirit)
+(which-key-add-key-based-replacements "SPC a a" "animal spirit")
 
 ;;; init.el ends here
 (custom-set-variables
