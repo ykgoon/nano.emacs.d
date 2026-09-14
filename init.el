@@ -2585,6 +2585,99 @@ With prefix ARG, also copy to kill-ring + clipboard."
   "SPC a w e" "eww"
   "SPC a w r" "elfeed")
 
+;; 23a0. Evil-collection truce — deterministic nano keys.
+;;      Collection setup binds theme ids by default keys in elfeed maps
+;;      (scroll-down->SPC, refresh->gr, show quit->q), and its show-map
+;;      binds defer via `after-load-functions', landing AFTER §23 key
+;;      blocks depending on load history (magit-first, desktop restore).
+;;      Result: SPC/gr/q randomly clobbered.  Fix both sides:
+;;      `:enabled nil' (fn-scoped to elfeed maps only, magit untouched)
+;;      stops collection binding the contested ids, and setup-hook
+;;      re-applies nano keys after collection setup (last-writer wins).
+;;      Must stay BEFORE first `evil-collection-init' (lazy, §10) —
+;;      restart emacs after editing (no reloader).
+(defun nano/elfeed-collection-allow-p (map-sym id)
+  "t when evil-collection theme ID may bind in MAP-SYM.
+Nil for contested ids in elfeed maps: frees SPC/S-SPC (scroll),
+gr/gR (refresh), show q (quit) for nano keys."
+  (not (and (memq map-sym '(elfeed-search-mode-map elfeed-show-mode-map
+                            elfeed-tree-mode-map))
+            (if (eq map-sym 'elfeed-show-mode-map)
+                (memq id '(scroll-down scroll-up refresh refresh-all
+                           quit quit-save quit-cancel))
+              (memq id '(scroll-down scroll-up refresh refresh-all))))))
+;; NOTE: `:enabled' function values MUST be anonymous lambdas —
+;; `evil-collection-binding-enabled-p' funcalls only non-symbol
+;; functions, a named symbol counts as plain truthy data.
+(setq evil-collection-binding-overrides
+      (let ((allow (lambda (map-sym id _keys _cmd)
+                     (nano/elfeed-collection-allow-p map-sym id))))
+        `((scroll-down :enabled ,allow)
+          (scroll-up :enabled ,allow)
+          (refresh :enabled ,allow)
+          (refresh-all :enabled ,allow)
+          (quit :enabled ,allow)
+          (quit-save :enabled ,allow)
+          (quit-cancel :enabled ,allow))))
+
+(defun nano/elfeed-search-keys ()
+  "SPC leader + Spacemacs search extras.  Re-applied via setup-hook."
+  (evil-define-key '(normal visual motion) elfeed-search-mode-map
+    (kbd "SPC") spacemacs-leader-map)
+  ;; `b' browse + `r' mark-read re-bound explicitly: evil normal
+  ;; `b' (backward-word) / `r' (replace) shadow native search keys,
+  ;; and evil-collection-elfeed binds neither.
+  (evil-define-key 'normal elfeed-search-mode-map
+    "b" #'elfeed-search-browse-url
+    "r" #'elfeed-search-untag-unread
+    "c" #'elfeed-db-compact
+    "gr" #'elfeed-update
+    "gR" #'elfeed-search-update--force
+    "gu" #'elfeed-unjam
+    "o" #'elfeed-load-opml
+    "K" #'nano/elfeed-toggle-sort-mode)
+  ;; Spacemacs visual extras (`packages.el:49-53').
+  (evil-define-key 'visual elfeed-search-mode-map
+    "+" #'elfeed-search-tag-all
+    "-" #'elfeed-search-untag-all
+    "b" #'elfeed-search-browse-url
+    "y" #'elfeed-search-yank))
+
+(defun nano/elfeed-show-keys ()
+  "SPC leader + Spacemacs show extras.  Re-applied via setup-hook.
+`q' kills + closes split (`nano/elfeed-show-quit')."
+  (evil-define-key '(normal visual motion) elfeed-show-mode-map
+    (kbd "SPC") spacemacs-leader-map)
+  ;; Native next/prev already route through switch/delete (§23a2),
+  ;; so they stay in the split.
+  (evil-define-key '(normal motion) elfeed-show-mode-map
+    (kbd "C-j") #'elfeed-show-next
+    (kbd "C-k") #'elfeed-show-prev
+    "n" #'elfeed-show-next
+    "p" #'elfeed-show-prev
+    "q" #'nano/elfeed-show-quit))
+
+(defun nano/elfeed-collection-setup-hook (mode _keymaps)
+  "Re-apply nano elfeed keys after evil-collection setup for MODE."
+  (when (eq mode 'elfeed)
+    (when (and (boundp 'elfeed-search-mode-map)
+               (keymapp elfeed-search-mode-map))
+      (nano/elfeed-search-keys))
+    (when (and (boundp 'elfeed-show-mode-map)
+               (keymapp elfeed-show-mode-map))
+      (nano/elfeed-show-keys))))
+(add-hook 'evil-collection-setup-hook #'nano/elfeed-collection-setup-hook)
+
+;; 23a0b. Search list never wraps — special case vs §2c global visual-line.
+;;      elfeed sets `truncate-lines t' but global-visual-line re-wraps.
+;;      Hook runs per buffer (incl. desktop restore); entry buffers keep wrap.
+(defun nano/elfeed-search-no-wrap ()
+  "Truncate long titles in *elfeed-search*.  Entry buffers keep wrap."
+  (visual-line-mode -1)
+  (setq-local truncate-lines t
+              word-wrap nil))
+(add-hook 'elfeed-search-mode-hook #'nano/elfeed-search-no-wrap)
+
 ;; 23a. Sort toggle — date (oldest first) <-> random, `K' in search.
 ;;      `elfeed-sort-order' default; per-buffer vars applied by fn below.
 (setq elfeed-sort-order 'ascending)
@@ -2694,29 +2787,11 @@ minus the feed source column so titles gain its width."
 
 (with-eval-after-load 'evil
   (with-eval-after-load 'elfeed-search
-    ;; SPC = leader (user choice).  Collection binds no SPC here, but
-    ;; bind explicitly so future upstream SPC additions can't shadow it.
-    (evil-define-key '(normal visual motion) elfeed-search-mode-map
-      (kbd "SPC") spacemacs-leader-map)
+    ;; SPC = leader (user choice).  Collection binds no SPC here (§23a0
+    ;; disables scroll-down/up), but bind explicitly so future upstream
+    ;; SPC additions can't shadow it.
     ;; Spacemacs search extras (`elfeed/packages.el:34-42').
-    ;; `b' browse + `r' mark-read re-bound explicitly: evil normal
-    ;; `b' (backward-word) / `r' (replace) shadow native search keys,
-    ;; and evil-collection-elfeed binds neither.
-    (evil-define-key 'normal elfeed-search-mode-map
-      "b" #'elfeed-search-browse-url
-      "r" #'elfeed-search-untag-unread
-      "c" #'elfeed-db-compact
-      "gr" #'elfeed-update
-      "gR" #'elfeed-search-update--force
-      "gu" #'elfeed-unjam
-      "o" #'elfeed-load-opml
-      "K" #'nano/elfeed-toggle-sort-mode)
-    ;; Spacemacs visual extras (`packages.el:49-53').
-    (evil-define-key 'visual elfeed-search-mode-map
-      "+" #'elfeed-search-tag-all
-      "-" #'elfeed-search-untag-all
-      "b" #'elfeed-search-browse-url
-      "y" #'elfeed-search-yank)))
+    (nano/elfeed-search-keys)))
 
 ;; 23a2. Split entry view — RET keeps search visible (Spacemacs parity).
 ;;      Built-in `display-buffer' right split, no popwin dep.
@@ -2729,13 +2804,18 @@ minus the feed source column so titles gain its width."
       (select-window win))))
 
 (defun nano/elfeed-show-quit ()
-  "Kill entry buffer, delete its window, refocus search."
+  "Kill entry buffer, delete its window, refocus search.
+Single-window frame keeps its window (bury instead of delete)."
   (interactive)
-  (let ((search (get-buffer "*elfeed-search*")))
+  (let ((search (get-buffer "*elfeed-search*"))
+        (win (selected-window)))
     (kill-buffer (current-buffer))
-    (delete-window)
-    (when-let ((win (get-buffer-window search)))
-      (select-window win))))
+    (when (and (window-live-p win)
+               (> (count-windows) 1)
+               (not (window-minibuffer-p win)))
+      (delete-window win))
+    (when-let ((swin (get-buffer-window search)))
+      (select-window swin))))
 
 (with-eval-after-load 'elfeed-show
   (setq elfeed-show-entry-switch #'nano/elfeed-show-split
@@ -2743,17 +2823,7 @@ minus the feed source column so titles gain its width."
 
 (with-eval-after-load 'evil
   (with-eval-after-load 'elfeed-show
-    (evil-define-key '(normal visual motion) elfeed-show-mode-map
-      (kbd "SPC") spacemacs-leader-map)
-    ;; Spacemacs show extras (`packages.el:34-42').
-    ;; Native next/prev already route through switch/delete above,
-    ;; so they stay in the split.  `q' kills + closes split.
-    (evil-define-key 'normal elfeed-show-mode-map
-      (kbd "C-j") #'elfeed-show-next
-      (kbd "C-k") #'elfeed-show-prev
-      "n" #'elfeed-show-next
-      "p" #'elfeed-show-prev
-      "q" #'nano/elfeed-show-quit)
+    (nano/elfeed-show-keys)
     ;; Goodies ace-link (`packages.el:60-61'), after show map exists.
     (with-eval-after-load 'elfeed-goodies
       (evil-define-key 'normal elfeed-show-mode-map
