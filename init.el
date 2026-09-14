@@ -167,15 +167,6 @@
           (lambda (_f) (when (fboundp 'menu-bar-mode) (menu-bar-mode -1))
             (when (fboundp 'tool-bar-mode) (tool-bar-mode -1))))
 
-;; Maximized desktop startup — re-assert after nano-layout.el:22 overwrote alists.
-;; early-init.el sets same before first frame (no flicker); this ensures persistence.
-;; (add-to-list 'initial-frame-alist '(fullscreen . maximized))
-;; (add-to-list 'default-frame-alist '(fullscreen . maximized))
-;; Fallback: init.el runs after initial frame creation, so explicitly maximize
-;; the live frame (tty/batch ignored, graphic only).
-;; (add-hook 'window-setup-hook (lambda () (when (display-graphic-p)
-;;                                         (set-frame-parameter nil 'fullscreen 'maximized))))
-
 
 ;; ---------------------------------------------------------------------
 ;; §3  Vim emulation  (evil + which-key)
@@ -592,7 +583,7 @@ Bound to SPC q q."
   "Paint `nano-face-header-active' green per theme.  Re-applied after refresh."
   (if (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
       (set-face-attribute 'nano-face-header-active nil
-                          :foreground "#FFFFFF" :background "#2F9E44"
+                          :foreground "#37474F" :background "#B2F2BB"
                           :box `(:line-width 1 :color ,nano-color-background :style nil))
     (set-face-attribute 'nano-face-header-active nil
                         :foreground "#2E3440" :background "#A3BE8C"
@@ -1097,7 +1088,7 @@ With prefix ARG, pass through to `tab-bar-new-tab'."
                       (propertize (concat "[" s "]") 'face 'warning)
                     s)))
               (nano/workspace--tabs) " | ")
-   "  (1-9 go/new, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q quit)"))
+   "  (1-9 go/new, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q/C-g quit)"))
 
 (defun nano/workspace-select-or-create (n)
   "Switch to workspace N; create trailing workspace when N beyond last.
@@ -1144,8 +1135,8 @@ Spacemacs nth/new parity — tab-bar is gapless, so N past end appends."
          ((eq ev ?\t) (tab-bar-switch-to-last-tab))
          ((eq ev ?l) (nano/workspace-list-and-switch) (setq done t))
          ((eq ev ?b) (call-interactively #'switch-to-buffer) (setq done t))
-         ((memq ev (list ?q ?\r ?\e)) (setq done t) (message nil))
-         ((eq ev ??) (message "Keys: 1-9 go/create, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q quit"))
+         ((memq ev (list ?q ?\C-g ?\r ?\e)) (setq done t) (message nil))
+         ((eq ev ??) (message "Keys: 1-9 go/create, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q/C-g quit"))
          (t (message "Unknown workspace key: %s" (key-description (vector ev)))))))))
 
 (define-key spacemacs-leader-map (kbd "l") 'nano/workspace-dispatch)
@@ -2113,11 +2104,16 @@ No-op (warn once via `nano/org-ensure-directory') when dir missing."
       (kbd "SPC") spacemacs-leader-map)
     ;; Spacemacs evilified parity (`org/packages.el:609-638'), minus
     ;; transient `.'.  j/k = agenda-aware line motion (not raw
-    ;; evil-next-line); M-j/k item, M-h/l earlier/later, gd grid,
-    ;; gr redo, M-RET show-and-scroll-up.
+    ;; evil-next-line); M-j/k item, M-h/l earlier/later (span-relative:
+    ;; week view = +-1 week, `C-u N' = N spans), J/K single-key week
+    ;; hop (same fns, no META), gd grid, gr redo, M-RET show-and-scroll-up.
+    ;; NOTE: J reclaims base `org-agenda-clock-goto' (still on `, Cj');
+    ;; K was free (Spacemacs nils evil lookup).
     (evil-define-key 'motion org-agenda-mode-map
       "j" #'org-agenda-next-line
       "k" #'org-agenda-previous-line
+      "J" #'org-agenda-earlier
+      "K" #'org-agenda-later
       (kbd "M-j") #'org-agenda-next-item
       (kbd "M-k") #'org-agenda-previous-item
       (kbd "M-h") #'org-agenda-earlier
@@ -2198,7 +2194,8 @@ MIN-TO-APP ignored (warning 0).  D-Bus fail falls back to echo."
   (when (nano/org-ensure-directory)
     (nano/org-agenda-refresh-files)
     (when (or (featurep 'org-agenda) (require 'org-agenda nil t))
-      (ignore-errors (org-agenda-to-appt t nil :scheduled*)))))
+      (let ((inhibit-message t))
+        (ignore-errors (org-agenda-to-appt t nil :scheduled*))))))
 
 (unless noninteractive
   (appt-activate 1)
