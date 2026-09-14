@@ -1867,9 +1867,19 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 
 (defun nano/org-agenda-top-level-files ()
   "Return non-recursive *.org files directly under `nano/org-directory'.
-Skips subdirs (e.g. roam/) so agenda scans fewer files."
+Skips subdirs (e.g. roam/) so agenda scans fewer files.  Also skips
+Emacs lock symlinks (.#*), auto-saves (#*#) and backups (*~): stale
+ones are dangling/nonexistent and make `org-agenda-to-appt' prompt
+[R]emove/[A]bort, stealing the next keypress after a TODO change."
   (when (file-directory-p nano/org-directory)
-    (directory-files nano/org-directory t "\\.org$")))
+    (seq-filter (lambda (f)
+                  (let ((n (file-name-nondirectory f)))
+                    (and (string-suffix-p ".org" n)
+                         (not (string-prefix-p ".#" n))
+                         (not (and (string-prefix-p "#" n)
+                                   (string-suffix-p "#" n)))
+                         (not (string-suffix-p "~" n)))))
+                (directory-files nano/org-directory t))))
 
 (when (file-directory-p nano/org-directory)
   (setq org-agenda-files (nano/org-agenda-top-level-files))) ; agenda scope = top-level org dir only
