@@ -16,7 +16,7 @@
 ;;   §4  SPC leader definition  (native, no general.el)
 ;;   §5  Leader keybindings  (file / buffer / window / quit / search)
 ;;   §6  Window management  (winum, header-line, double/triple columns, uniform widths)
-;;   §7  Theme toggle + persistence  (SPC T n)
+;;   §7  Theme toggle + persistence + spacemacs-light  (SPC t n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
 ;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
 ;;   §10 Git  (magit + delta, SPC g)
@@ -576,14 +576,14 @@ Bound to SPC q q."
 ;;     (workspace + file duplicated); workspace now lives far-right and the
 ;;     initial tab is named "main" in §9, so no adjacency dup.
 (defface nano-face-header-active nil
-  "Green highlight for selected window modeline blocks."
+  "Selected-window highlight for modeline blocks."
   :group 'nano)
 
 (defun nano/apply-modeline-active-face ()
-  "Paint `nano-face-header-active' green per theme.  Re-applied after refresh."
+  "Paint `nano-face-header-active' per theme.  Re-applied after refresh."
   (if (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
       (set-face-attribute 'nano-face-header-active nil
-                          :foreground "#37474F" :background "#B2F2BB"
+                          :foreground "#655370" :background "#d3d3e7"
                           :box `(:line-width 1 :color ,nano-color-background :style nil))
     (set-face-attribute 'nano-face-header-active nil
                         :foreground "#2E3440" :background "#A3BE8C"
@@ -866,7 +866,7 @@ Bound to SPC w =. Runs automatically after splits/deletes."
 
 
 ;; ---------------------------------------------------------------------
-;; §7  Toggles  (SPC t n theme, SPC t w whitespace)
+;; §7  Toggles  (SPC t n theme, SPC t w whitespace, §7c spacemacs-light)
 ;; ---------------------------------------------------------------------
 ;; 7a. Theme — uses vendored nano-theme.el:802 `nano-toggle-theme' which checks
 ;; `nano-theme-var' ("light"/"dark") and calls `nano-theme-set-*' +
@@ -946,6 +946,111 @@ Bound to SPC w =. Runs automatically after splits/deletes."
 (nano/apply-mode-line-box)
 (when (fboundp 'nano-refresh-theme)
   (advice-add 'nano-refresh-theme :after #'nano/apply-mode-line-box))
+
+;; 7c. Spacemacs-light emulation — light theme only, dark untouched.
+;;     Palette = spacemacs-theme.el GUI light column
+;;     (~/.emacs.d/core/libs/spacemacs-theme/spacemacs-theme.el:111-169).
+;;     Two hooks on vendored `nano-refresh-theme' (nano-theme.el:790):
+;;     :before remaps the 9 nano colors so `nano-faces'/`nano-theme'
+;;     derive from Spacemacs values; :after breaks out the flat
+;;     font-lock/org faces nano collapses (all-salient keywords,
+;;     all-strong org levels).  Never edit straight/repos/ (lost on
+;;     `straight-pull-all'); all overrides live here.
+(defconst nano/spacemacs-light-palette
+  '((bg1 . "#fbf8ef") (bg2 . "#efeae9") (base . "#655370")
+    (base-dim . "#a094a2") (keyword . "#3a81c3") (func . "#6c3163")
+    (str . "#2d9574") (type . "#ba2f59") (var . "#715ab1")
+    (const . "#4e3163") (comment . "#2aa1ae") (comment-bg . "#ecf3ec")
+    (meta . "#da8b55") (war . "#dc752f") (suc . "#42ae2c")
+    (err . "#e0211d") (highlight . "#d3d3e7") (strong . "#100a14")
+    (head2 . "#2d9574") (head3 . "#67b11d") (head4 . "#b1951d")
+    (yellow-bg . "#f6f1e1") (green-bg . "#edf2e9")
+    (cblk . "#655370") (cblk-bg . "#e8e3f0")
+    (cblk-ln . "#9380b2") (cblk-ln-bg . "#ddd8eb"))
+  "Spacemacs-light GUI hexes used by the §7c overrides.")
+
+(defun nano/remap-spacemacs-light-colors (&rest _)
+  "Remap the 9 nano colors to Spacemacs-light when light.
+Installed :before `nano-refresh-theme' so `nano-faces' derives
+from remapped values.  No-op when dark."
+  (when (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
+    (let ((g (lambda (k) (cdr (assq k nano/spacemacs-light-palette)))))
+      (setq nano-color-background (funcall g 'bg1)
+            nano-color-foreground (funcall g 'base)
+            nano-color-highlight (funcall g 'bg2)
+            nano-color-subtle (funcall g 'bg2)
+            nano-color-faded (funcall g 'base-dim)
+            nano-color-salient (funcall g 'keyword)
+            nano-color-strong (funcall g 'strong)
+            nano-color-popout (funcall g 'type)
+            nano-color-critical (funcall g 'err)))))
+
+(defun nano/set-face-maybe (face &rest args)
+  "Apply `set-face-attribute' ARGS to FACE when it exists.
+Guards org/outline faces before their libraries load."
+  (when (facep face)
+    (apply #'set-face-attribute face nil args)))
+
+(defun nano/apply-spacemacs-light-org-faces ()
+  "Apply Spacemacs-light org/outline faces.  Safe before org loads."
+  (when (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
+    (let ((g (lambda (k) (cdr (assq k nano/spacemacs-light-palette)))))
+      (nano/set-face-maybe 'org-level-1 :foreground (funcall g 'keyword) :weight 'bold :height 1.3)
+      (nano/set-face-maybe 'org-level-2 :foreground (funcall g 'head2) :weight 'bold :height 1.2)
+      (nano/set-face-maybe 'org-level-3 :foreground (funcall g 'head3) :weight 'normal :height 1.1)
+      (nano/set-face-maybe 'org-level-4 :foreground (funcall g 'head4) :weight 'normal)
+      (nano/set-face-maybe 'org-level-5 :foreground (funcall g 'keyword) :weight 'normal)
+      (nano/set-face-maybe 'org-level-6 :foreground (funcall g 'head2) :weight 'normal)
+      (nano/set-face-maybe 'org-level-7 :foreground (funcall g 'head3) :weight 'normal)
+      (nano/set-face-maybe 'org-level-8 :foreground (funcall g 'head4) :weight 'normal)
+      (nano/set-face-maybe 'outline-1 :foreground (funcall g 'keyword))
+      (nano/set-face-maybe 'outline-2 :foreground (funcall g 'head2))
+      (nano/set-face-maybe 'outline-3 :foreground (funcall g 'head3))
+      (nano/set-face-maybe 'outline-4 :foreground (funcall g 'head4))
+      (nano/set-face-maybe 'org-link :foreground (funcall g 'keyword) :underline t :weight 'normal)
+      (nano/set-face-maybe 'org-date :foreground (funcall g 'var) :underline t)
+      (nano/set-face-maybe 'org-todo :foreground (funcall g 'war) :background (funcall g 'yellow-bg) :weight 'bold)
+      (nano/set-face-maybe 'org-done :foreground (funcall g 'suc) :background (funcall g 'green-bg) :weight 'bold)
+      (nano/set-face-maybe 'org-block :foreground (funcall g 'cblk) :background (funcall g 'cblk-bg) :extend t)
+      (nano/set-face-maybe 'org-block-begin-line :foreground (funcall g 'cblk-ln) :background (funcall g 'cblk-ln-bg) :extend t)
+      (nano/set-face-maybe 'org-block-end-line :foreground (funcall g 'cblk-ln) :background (funcall g 'cblk-ln-bg) :extend t)
+      (nano/set-face-maybe 'org-tag :foreground (funcall g 'meta))
+      (nano/set-face-maybe 'org-special-keyword :foreground (funcall g 'func))
+      (nano/set-face-maybe 'org-meta-line :foreground (funcall g 'meta))
+      (nano/set-face-maybe 'org-document-title :foreground (funcall g 'func) :weight 'bold :height 1.4 :underline t))))
+
+(defun nano/apply-spacemacs-light-faces (&rest _)
+  "Break out font-lock/org faces to Spacemacs-light when light.
+Installed :after `nano-refresh-theme'.  No-op when dark."
+  (when (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
+    (let ((g (lambda (k) (cdr (assq k nano/spacemacs-light-palette)))))
+      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg) :slant 'normal :weight 'light)
+      (nano/set-face-maybe 'font-lock-doc-face :foreground (funcall g 'meta))
+      (nano/set-face-maybe 'font-lock-string-face :foreground (funcall g 'str))
+      (nano/set-face-maybe 'font-lock-keyword-face :foreground (funcall g 'keyword) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-builtin-face :foreground (funcall g 'keyword) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-preprocessor-face :foreground (funcall g 'func))
+      (nano/set-face-maybe 'font-lock-type-face :foreground (funcall g 'type) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-constant-face :foreground (funcall g 'const))
+      (nano/set-face-maybe 'font-lock-variable-name-face :foreground (funcall g 'var))
+      (nano/set-face-maybe 'font-lock-function-name-face :foreground (funcall g 'func) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-warning-face :foreground (funcall g 'war))
+      (nano/set-face-maybe 'link :foreground (funcall g 'keyword) :underline t)
+      (nano/apply-spacemacs-light-org-faces))))
+
+;; Re-apply org faces when org loads later (toggle state read live).
+(with-eval-after-load 'org
+  (nano/apply-spacemacs-light-org-faces))
+
+(when (fboundp 'nano-refresh-theme)
+  (advice-add 'nano-refresh-theme :before #'nano/remap-spacemacs-light-colors)
+  (advice-add 'nano-refresh-theme :after #'nano/apply-spacemacs-light-faces))
+
+;; `nano/theme-restore' above already refreshed with stock colors;
+;; re-refresh once so faces derive from the remapped palette.
+(when (and (boundp 'nano-theme-var) (string= nano-theme-var "light")
+           (fboundp 'nano-refresh-theme))
+  (nano-refresh-theme))
 
 (defun nano/trailing-whitespace-inhibit-p ()
   "Non-nil when current buffer should skip trailing-whitespace highlight."
