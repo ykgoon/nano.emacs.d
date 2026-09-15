@@ -1,20 +1,3 @@
-# straight.el + runtime cache
-/straight/
-/eln-cache/
-/elpa/
-/auto-save-list/
-
-# Emacs droppings
-*~
-\#*\#
-.\#*
-*.elc
-.org-id-locations
-
-# Local state (theme choice, etc.)
-/var/
-/url/
-/elfeed/
-/transient/
-/projects
-/tramp
+*
+!early-init.el
+!init.el

@@ -569,7 +569,7 @@ Bound to SPC q q."
 (define-key winum-keymap (kbd "M-9") 'winum-select-window-9)
 
 ;; 6b. Modeline sections — Spacemacs blocks, bottom bar only
-;;     Layout: [N] [RO/RW/**] filename (detail) ... position <workspace> %p
+;;     Layout: [N] [E] [RO/RW/**/>< /@host] filename (detail) ... [sel|position] <workspace> %p
 ;;     Redefines `nano-modeline-compose' (same signature, so every mode
 ;;     benefits) instead of patching nano source.  Single auto-named tab
 ;;     tracks the buffer name, which used to render `<init.el> ... init.el'
@@ -610,6 +610,56 @@ Bound to SPC q q."
                               'nano-face-header-active
                             'nano-face-header-strong))))))
 
+;; Evil-state tag. Single letter, state-colored when selected. nil when evil off.
+(defun nano/evil-state-string ()
+  "Return propertized evil-state block, or nil."
+  (when (and (bound-and-true-p evil-mode)
+             (boundp 'evil-state) evil-state)
+    (let* ((active (nano/modeline-selected-p))
+           (pair (cond ((eq evil-state 'normal)   '(" N " . nano-face-header-active))
+                       ((eq evil-state 'insert)   '(" I " . nano-face-header-critical))
+                       ((eq evil-state 'visual)   '(" V " . nano-face-header-salient))
+                       ((eq evil-state 'emacs)    '(" E " . nano-face-header-popout))
+                       ((eq evil-state 'motion)   '(" M " . nano-face-header-strong))
+                       ((eq evil-state 'replace)  '(" R " . nano-face-header-critical))
+                       ((eq evil-state 'operator) '(" O " . nano-face-header-popout))
+                       (t nil))))
+      (when pair
+        (propertize (car pair)
+                    'face (if active (cdr pair) 'nano-face-header-strong))))))
+
+;; Narrow (><) + TRAMP (@host) flags. Buffer-local checks only.
+(defun nano/modeline-extra-flags ()
+  "Return propertized narrow/remote flag string, or nil."
+  (let ((narrow (and (fboundp 'buffer-narrowed-p) (ignore-errors (buffer-narrowed-p))))
+        (host (ignore-errors (file-remote-p default-directory 'host)))
+        (s ""))
+    (when narrow
+      (setq s (concat s (propertize " >< " 'face 'nano-face-header-popout))))
+    (when (and host (not (string-empty-p host)))
+      (setq s (concat s (propertize (format " @%s " host) 'face 'nano-face-header-faded))))
+    (unless (string-empty-p s) s)))
+
+;; Selection info. Replaces position with L:C while region is active.
+(defun nano/modeline-selection-string ()
+  "Return propertized ` L:C ' block when region active, else nil."
+  (when (use-region-p)
+    (ignore-errors
+      (let* ((rb (region-beginning))
+             (re (region-end))
+             (lines (count-lines rb re))
+             (chars (- re rb)))
+        (propertize (format " %dL:%dC " lines chars)
+                    'face 'nano-face-header-default)))))
+
+;; Responsive truncation. Narrow columns drop ws, primary, static position first.
+(defvar nano/modeline-truncate-ws-width 90
+  "Below this column width, drop the workspace block.")
+(defvar nano/modeline-truncate-primary-width 70
+  "Below this column width, drop the primary (mode/branch) block.")
+(defvar nano/modeline-truncate-secondary-width 50
+  "Below this column width, drop static position; selection still shows.")
+
 (defun nano/workspace-name-string ()
   "Return propertized current tab-bar workspace block, or nil.
 Reads the tab's explicit name (`SPC l r'); unnamed tabs fall back to
@@ -643,12 +693,23 @@ which duplicated the filename in the modeline."
 
 (with-eval-after-load 'nano-modeline
   (defun nano-modeline-compose (status name primary secondary)
-    "Spacemacs-block modeline: winum, RO/RW/**, filename, far-right workspace + scroll percent."
+    "Spacemacs-block modeline: winum, evil-state, RO/RW/**/narrow/remote, filename, far-right workspace + scroll percent.
+Drops low-priority blocks on narrow columns; selection replaces position."
     (let* ((char-width    (window-font-width nil 'mode-line))
            (space-up       +0.15)
            (space-down     -0.20)
            (winum (nano/winum-number-string))
-           (ws    (nano/workspace-name-string))
+           (evil (nano/evil-state-string))
+           (extra (nano/modeline-extra-flags))
+           (sel (nano/modeline-selection-string))
+           (ww (window-total-width))
+           ;; Width-gated blocks.
+           (ws-full (nano/workspace-name-string))
+           (ws (if (< ww nano/modeline-truncate-ws-width) nil ws-full))
+           (primary-eff (if (< ww nano/modeline-truncate-primary-width) "" primary))
+           (secondary-base (or sel secondary))
+           (secondary-eff (if (or sel (>= ww nano/modeline-truncate-secondary-width))
+                              secondary-base ""))
            (active (nano/modeline-selected-p))
            ;; RO/RW both faded grey, ** critical.
            (prefix (let* ((code (cond ((string-suffix-p "RO" status) "RO")
@@ -672,13 +733,15 @@ which duplicated the filename in the modeline."
                             'display `(raise ,space-down)))
            (head (concat
                   (or winum "")
+                  (or evil "")
                   sep
                    prefix
+                   (or extra "")
                    (propertize (concat " " name " ")
                                'face (if active
                                          'nano-face-header-active
                                        'nano-face-header-strong))
-                  (propertize primary 'face 'nano-face-header-default
+                  (propertize primary-eff 'face 'nano-face-header-default
                               'display `(raise ,space-up))))
             (pct-text (concat " " (nano/modeline-scroll-percent) " "))
             (pct-display (propertize pct-text
@@ -690,12 +753,12 @@ which duplicated the filename in the modeline."
             (pct (propertize (string-replace "%" "%%" pct-text)
                            'face 'nano-face-header-default
                            'display `(raise ,space-up)))
-            (right (concat secondary
+            (right (concat secondary-eff
                            (propertize " " 'face 'nano-face-header-default
                                        'display `(raise ,space-down))
                            (or ws "")
                            pct))
-            (right-for-width (concat secondary
+            (right-for-width (concat secondary-eff
                                      (propertize " " 'face 'nano-face-header-default
                                                  'display `(raise ,space-down))
                                      (or ws "")
@@ -1132,6 +1195,7 @@ Exempt buffers (read-only / special-mode) stay off when enabling."
       tab-bar-new-button-show nil
       tab-bar-tab-hints t
       tab-bar-new-tab-choice "*scratch*"
+      tab-bar-new-tab-to 'rightmost
       tab-bar-format '(tab-bar-format-tabs tab-bar-separator))
 
 ;; Single auto-named tab tracks the buffer name — name it "main" so the
@@ -1474,11 +1538,16 @@ falls back to built-in `rgrep' + one-time install hint."
 Shows all non-empty lines via `completing-read' (fido-vertical §8
 lists all on empty input, flex filters as you type, like SPC f f).
 RET jumps to chosen line, pushing mark first.  Initial input is
-symbol at point.  Skips empty lines, truncates long lines for display."
+active region, else symbol at point (Spacemacs parity), else empty.
+Skips empty lines, truncates long lines for display."
   (interactive)
   (let ((cands nil)
         (n 0)
-        (truncated nil))
+        (truncated nil)
+        (initial (if (use-region-p)
+                     (buffer-substring-no-properties
+                      (region-beginning) (region-end))
+                   (or (thing-at-point 'symbol t) ""))))
     (save-excursion
       (save-restriction
         (widen)
@@ -1500,7 +1569,7 @@ symbol at point.  Skips empty lines, truncates long lines for display."
     (unless cands
       (user-error "SPC s s: no non-empty lines"))
     (let ((choice (completing-read "Search lines: " (nreverse cands) nil t
-                                   nil nil (thing-at-point 'symbol))))
+                                   initial nil nil)))
       (when (string-match "^\\([0-9]+\\): " choice)
         (let ((ln (string-to-number (match-string 1 choice))))
           (push-mark nil t)
