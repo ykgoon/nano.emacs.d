@@ -2722,6 +2722,52 @@ With prefix ARG, also copy to kill-ring + clipboard."
     (concat "SPC " (nth 1 b)) (nth 3 b)))
 (which-key-add-key-based-replacements "SPC o d" "dailies")
 
+;; 21d. RET creates new node — fido DWIM for `org-roam-node' category.
+;;      `org-roam-node-read' (org-roam-node.el) uses `completing-read'
+;;      with REQUIRE-MATCH=nil: any literal string becomes a new node
+;;      via `org-roam-node-create :title'.  Stock fido rebinds RET to
+;;      `icomplete-fido-ret' -> `force-complete-and-exit', coercing a
+;;      unique name to the first fuzzy match (new entry impossible).
+;;      DWIM: plain RET accepts literal (new node, or exact existing);
+;;      RET after C-j/C-k navigation selects highlighted candidate.
+;;      Other categories delegate to stock `icomplete-fido-ret'.
+;;      `M-j' (`icomplete-fido-exit') and `C-M-j' (force) unchanged.
+(defvar-local nano/org-roam--fido-navigated nil
+  "Non-nil when completions rotated in current roam prompt.
+Set by C-j/C-k (nav, §8), consumed by RET DWIM below.")
+
+(defun nano/org-roam--fido-mark-navigated (&rest _)
+  "Flag current minibuffer as navigated for roam RET DWIM."
+  (when (and (minibufferp)
+             (eq (ignore-errors (icomplete--category)) 'org-roam-node))
+    (setq nano/org-roam--fido-navigated t)))
+
+(defun nano/org-roam--fido-setup ()
+  "Reset nav flag on each roam prompt (minibuffer reused across reads)."
+  (when (eq (ignore-errors (icomplete--category)) 'org-roam-node)
+    (setq-local nano/org-roam--fido-navigated nil)))
+
+(defun nano/icomplete-fido-ret-roam-dwim ()
+  "RET DWIM for roam: literal (new node) unless navigated.
+Plain RET -> `minibuffer-complete-and-exit' (REQUIRE-MATCH nil,
+so unique name creates node).  After C-j/C-k rotation ->
+`icomplete-force-complete-and-exit' (select highlighted).
+Non-roam minibuffers fall back to `icomplete-fido-ret'."
+  (interactive)
+  (if (eq (ignore-errors (icomplete--category)) 'org-roam-node)
+      (if nano/org-roam--fido-navigated
+          (progn (setq nano/org-roam--fido-navigated nil)
+                 (call-interactively #'icomplete-force-complete-and-exit))
+        (call-interactively #'minibuffer-complete-and-exit))
+    (call-interactively #'icomplete-fido-ret)))
+
+(with-eval-after-load 'icomplete
+  (define-key icomplete-fido-mode-map (kbd "RET") #'nano/icomplete-fido-ret-roam-dwim)
+  (define-key icomplete-fido-mode-map (kbd "C-m") #'nano/icomplete-fido-ret-roam-dwim)
+  (advice-add 'icomplete-forward-completions :after #'nano/org-roam--fido-mark-navigated)
+  (advice-add 'icomplete-backward-completions :after #'nano/org-roam--fido-mark-navigated))
+(add-hook 'minibuffer-setup-hook #'nano/org-roam--fido-setup)
+
 
 ;; ---------------------------------------------------------------------
 ;; §22  Update  (float latest, SPC f e U pull+rebuild)

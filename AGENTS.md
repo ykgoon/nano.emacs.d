@@ -23,6 +23,7 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 
 ## Principles
 - Performance first. New features -> lightest solution wins. Prefer built-ins / minimal deps, lazy-load, fast startup. Justify heavy packages.
+- When design new UX/UI or behavior where there is no reference to emulate, employ design principles found in `./DESIGN.md`.
 
 ## UX/UI Reference
 - Future features needing UX/UI design — learn from Spacemacs as primary reference (mnemonic SPC leader, which-key, transient states, layer organization).
