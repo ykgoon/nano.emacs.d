@@ -400,6 +400,7 @@ Creates parent dirs after confirm.  Errors when buffer visits no file."
 (define-key spacemacs-leader-map (kbd "b p") 'previous-buffer)
 (define-key spacemacs-leader-map (kbd "b R") 'revert-buffer)
 (define-key spacemacs-leader-map (kbd "b s") 'nano/switch-to-scratch-buffer)
+(define-key spacemacs-leader-map (kbd "b w") 'read-only-mode)
 (define-key spacemacs-leader-map (kbd "b Y") 'nano/copy-whole-buffer-to-clipboard)
 (which-key-add-key-based-replacements
   "SPC TAB" "last buffer"
@@ -407,6 +408,7 @@ Creates parent dirs after confirm.  Errors when buffer visits no file."
   "SPC b R" "revert buffer"
   "SPC b e" "erase buffer"
   "SPC b s" "scratch buffer"
+  "SPC b w" "toggle read-only"
   "SPC b Y" "copy buffer")
 
 (defun nano/switch-to-scratch-buffer (&optional arg)
@@ -1671,6 +1673,7 @@ Skips empty lines, truncates long lines for display."
 (define-key spacemacs-leader-map (kbd "z x _") 'nano/zoom-out)
 (define-key spacemacs-leader-map (kbd "z x j") 'nano/zoom-out)
 (define-key spacemacs-leader-map (kbd "z x 0") 'nano/zoom-reset)
+(define-key spacemacs-leader-map (kbd "z x q") 'nano/zoom-quit)
 (which-key-add-key-based-replacements
   "SPC z x +" "zoom in"
   "SPC z x =" "zoom in"
@@ -1678,7 +1681,8 @@ Skips empty lines, truncates long lines for display."
   "SPC z x -" "zoom out"
   "SPC z x _" "zoom out"
   "SPC z x j" "zoom out"
-  "SPC z x 0" "reset zoom")
+  "SPC z x 0" "reset zoom"
+  "SPC z x q" "quit")
 
 
 ;; ---------------------------------------------------------------------
@@ -2060,12 +2064,100 @@ ones are dangling/nonexistent and make `org-agenda-to-appt' prompt
   (let ((ctx (ignore-errors (org-element-context))))
     (and ctx (eq (org-element-type ctx) 'link))))
 
+(defun nano/org-scratch-target-window ()
+  "Window showing `*scratch*', or selected window as fallback.
+Single window or scratch invisible → current window.  Scoped to
+selected frame; never touches elfeed splits (`elfeed-search/show')."
+  (let ((wins (window-list nil nil)))
+    (cond ((<= (length wins) 1) (selected-window))
+          ((get-buffer-window "*scratch*" nil))
+          (t (selected-window)))))
+
+(defun nano/org-link-external-p ()
+  "Non-nil when org link at point would open a new buffer.
+`file:' other-file and `id:' → t.  Fuzzy, custom-id, coderef,
+same-file plus `http(s):' (external browser, no buffer) → nil
+so those stay put."
+  (let ((ctx (ignore-errors (org-element-context))))
+    (when (and ctx (eq (org-element-type ctx) 'link))
+      (let ((type (org-element-property :type ctx))
+            (path (org-element-property :path ctx)))
+        (cond ((or (null type) (string= type "fuzzy")
+                   (string= type "custom-id") (string= type "coderef")) nil)
+              ((or (string= type "http") (string= type "https")) nil)
+              ((string= type "file")
+               (let* ((raw (car (split-string (or path "") "::")))
+                      (f (ignore-errors (expand-file-name raw default-directory)))
+                      (cur (buffer-file-name)))
+                 (if (or (null f) (null cur))
+                     t
+                   (not (string-equal (file-truename f) (file-truename cur))))))
+              (t t))))))
+
+(defun nano/org--scratch-target-usable-p (target origin)
+  "Non-nil when TARGET can receive an opened link buffer.
+Requires live, distinct from ORIGIN, not dedicated/minibuffer."
+  (and target (window-live-p target)
+       (not (eq target origin))
+       (not (window-dedicated-p target))
+       (not (window-minibuffer-p target))))
+
+(defun nano/org--move-opened-buffer-to-target (origin target origin-buf shown-before)
+  "Move buffer just opened from ORIGIN into TARGET, then select TARGET.
+ORIGIN-BUF is the org buffer before open; SHOWN-BEFORE is an alist
+of (window . buffer) captured pre-open.  Open must run in ORIGIN
+first (keeps link context); this only relocates the result.
+Returns t when a new buffer moved, nil when open stayed in place
+\(same-file jump, browser link, error path)."
+  (when (nano/org--scratch-target-usable-p target origin)
+    (let* ((cur-win (selected-window))
+           (result-win (if (eq cur-win origin) origin cur-win))
+           (result-buf (window-buffer result-win))
+           (result-pt (window-point result-win)))
+      (unless (or (null result-buf) (eq result-buf origin-buf))
+        (when (eq result-win origin)
+          (set-window-buffer origin origin-buf))
+        (when (and (not (eq result-win origin))
+                   (not (eq result-win target)))
+          (let ((prev (cdr (assq result-win shown-before))))
+            (cond ((and prev (buffer-live-p prev))
+                   (set-window-buffer result-win prev))
+                  ((and (not (assq result-win shown-before))
+                        (window-live-p result-win))
+                   (delete-window result-win)))))
+        (set-window-buffer target result-buf)
+        (set-window-point target result-pt)
+        (select-window target)
+        t))))
+
+(defun nano/org-open-at-point-in-scratch-window (&optional arg)
+  "Open org link at point, external targets in `*scratch*' window.
+`file:' other-file and `id:' relocate to scratch window; fuzzy,
+same-file and `http(s):' open in place.  Single window or scratch
+invisible → current window.  Org-only; elfeed RET untouched
+\(elfeed maps never bind this).  Focus follows to target."
+  (interactive "P")
+  (unless (derived-mode-p 'org-mode)
+    (user-error "Not in org-mode"))
+  (if (not (ignore-errors (nano/org-link-external-p)))
+      (org-open-at-point arg)
+    (let ((target (nano/org-scratch-target-window))
+          (origin (selected-window)))
+      (if (not (nano/org--scratch-target-usable-p target origin))
+          (org-open-at-point arg)
+        (let ((origin-buf (window-buffer origin))
+              (shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
+                                    (window-list nil nil))))
+          (org-open-at-point arg)
+          (nano/org--move-opened-buffer-to-target
+           origin target origin-buf shown-before))))))
+
 (defun nano/org-ret-dwim ()
   "Follow org link at point, else `evil-ret'.  Bound to RET in org normal/motion."
   (interactive)
   (if (and (derived-mode-p 'org-mode)
            (ignore-errors (nano/org-at-link-p)))
-      (call-interactively #'org-open-at-point)
+      (call-interactively #'nano/org-open-at-point-in-scratch-window)
     (call-interactively #'evil-ret)))
 
 (with-eval-after-load 'org
@@ -2124,7 +2216,9 @@ ones are dangling/nonexistent and make `org-agenda-to-appt' prompt
         (nano/org-link-face-p)))
   (ad-deactivate 'org-return)
   (defadvice org-return (around nano/org-autolist-return)
-    "Autolist with link-face fix: follow link when on one, even in lists."
+    "Autolist with link-face fix: follow link when on one, even in lists.
+External `file:'/`id:' links relocate to `*scratch*' window via
+open-then-move (link context stays in origin); elfeed untouched."
     (let* ((el (org-element-at-point))
            (parent (plist-get (cadr el) :parent))
            (is-listitem (or (org-at-item-p)
@@ -2148,7 +2242,20 @@ ones are dangling/nonexistent and make `org-agenda-to-appt' prompt
                         (< (point) (line-end-position)))
                    (newline))
                   (t (org-meta-return))))
-        ad-do-it)))
+        (if (and org-return-follows-link
+                 (ignore-errors (nano/org-link-external-p))
+                 (fboundp 'nano/org--move-opened-buffer-to-target))
+            (let ((origin (selected-window))
+                  (target (nano/org-scratch-target-window)))
+              (if (not (nano/org--scratch-target-usable-p target origin))
+                  ad-do-it
+                (let ((origin-buf (window-buffer origin))
+                      (shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
+                                            (window-list nil nil))))
+                  ad-do-it
+                  (nano/org--move-opened-buffer-to-target
+                   origin target origin-buf shown-before))))
+          ad-do-it))))
   (ad-activate 'org-return))
 
 (with-eval-after-load 'org
@@ -2195,7 +2302,7 @@ ones are dangling/nonexistent and make `org-agenda-to-appt' prompt
                                      "xb" 'nano/org-bold
                                      "xc" 'nano/org-code
                                      "xi" 'nano/org-italic
-                                     "xo" 'org-open-at-point ; moved from `, o'
+                                     "xo" 'nano/org-open-at-point-in-scratch-window ; moved from `, o'
                                      "xr" 'nano/org-clear-emphasis
                                      "xs" 'nano/org-strike-through
                                      "xu" 'nano/org-underline
