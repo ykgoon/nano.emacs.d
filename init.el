@@ -246,9 +246,11 @@
 (define-key spacemacs-leader-map (kbd "f r") 'recentf-open-files)
 (define-key spacemacs-leader-map (kbd "f D") 'nano/delete-current-buffer-file)
 (define-key spacemacs-leader-map (kbd "f R") 'nano/rename-current-buffer-file)
+(define-key spacemacs-leader-map (kbd "f c") 'nano/copy-current-buffer-file)
 (which-key-add-key-based-replacements
   "SPC f s" "save file"
   "SPC f S" "save all"
+  "SPC f c" "copy file"
   "SPC f D" "delete file"
   "SPC f R" "rename file")
 
@@ -301,6 +303,34 @@ Creates parent dirs after confirm.  Errors when buffer visits no file."
         (when (fboundp 'recentf-remove-if-non-kept)
           (recentf-remove-if-non-kept old)))
       (message "Renamed '%s' to '%s'" old-short (file-name-nondirectory new)))))
+
+(defun nano/copy-current-buffer-file (&optional arg)
+  "Copy file visited by current buffer to new path.  Bound to SPC f c.
+Without prefix ARG, prompt starts in current dir; with ARG, full old path.
+Creates parent dirs after confirm.  Buffer keeps visiting old file.
+Overwrites after confirm.  Errors when buffer visits no file."
+  (interactive "P")
+  (let ((old (buffer-file-name)))
+    (unless (and old (file-exists-p old))
+      (user-error "Buffer %s visits no file" (buffer-name)))
+    (let* ((old-dir (file-name-directory old))
+           (old-short (file-name-nondirectory old))
+           (path (read-file-name "Copy to: " (if arg old old-dir)))
+           (new (expand-file-name
+                 (if (string= (file-name-nondirectory path) "")
+                     (concat path old-short)
+                   path))))
+      (when (string-equal new (expand-file-name old))
+        (user-error "Same new and old name"))
+      (let ((new-dir (file-name-directory new)))
+        (when (and new-dir (not (file-exists-p new-dir)))
+          (unless (yes-or-no-p (format "Create directory '%s'? " new-dir))
+            (user-error "Canceled: copy"))
+          (make-directory new-dir t)))
+      (copy-file old new 1)
+      (when (fboundp 'recentf-add-file)
+        (recentf-add-file new))
+      (message "Copied '%s' to '%s'" old-short (file-name-nondirectory new)))))
 
 ;; 5a2. Yank/copy  (SPC f y) — Spacemacs parity, zero-dep.
 ;;      7 leaves: path, dir, name, base, buffer, path+line, path+line+col.
@@ -2130,12 +2160,22 @@ Returns t when a new buffer moved, nil when open stayed in place
         (select-window target)
         t))))
 
+(defun nano/org--open-in-current-window (&optional arg)
+  "Follow org link at point in current window.
+Shadows `org-link-frame-setup' `file' to `find-file' so `file:'
+uses same window; `id:' maps through same entry to
+`switch-to-buffer'.  Other entries untouched."
+  (let ((org-link-frame-setup (cons '(file . find-file)
+                                    org-link-frame-setup)))
+    (org-open-at-point arg)))
+
 (defun nano/org-open-at-point-in-scratch-window (&optional arg)
   "Open org link at point, external targets in `*scratch*' window.
 `file:' other-file and `id:' relocate to scratch window; fuzzy,
 same-file and `http(s):' open in place.  Single window or scratch
-invisible → current window.  Org-only; elfeed RET untouched
-\(elfeed maps never bind this).  Focus follows to target."
+invisible → current window via `nano/org--open-in-current-window'.
+Org-only; elfeed RET untouched (elfeed maps never bind this).
+Focus follows to target."
   (interactive "P")
   (unless (derived-mode-p 'org-mode)
     (user-error "Not in org-mode"))
@@ -2144,7 +2184,7 @@ invisible → current window.  Org-only; elfeed RET untouched
     (let ((target (nano/org-scratch-target-window))
           (origin (selected-window)))
       (if (not (nano/org--scratch-target-usable-p target origin))
-          (org-open-at-point arg)
+          (nano/org--open-in-current-window arg)
         (let ((origin-buf (window-buffer origin))
               (shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
                                     (window-list nil nil))))
@@ -2218,7 +2258,8 @@ invisible → current window.  Org-only; elfeed RET untouched
   (defadvice org-return (around nano/org-autolist-return)
     "Autolist with link-face fix: follow link when on one, even in lists.
 External `file:'/`id:' links relocate to `*scratch*' window via
-open-then-move (link context stays in origin); elfeed untouched."
+open-then-move (link context stays in origin); scratch invisible
+→ current window via `file . find-file' shadow; elfeed untouched."
     (let* ((el (org-element-at-point))
            (parent (plist-get (cadr el) :parent))
            (is-listitem (or (org-at-item-p)
@@ -2248,7 +2289,9 @@ open-then-move (link context stays in origin); elfeed untouched."
             (let ((origin (selected-window))
                   (target (nano/org-scratch-target-window)))
               (if (not (nano/org--scratch-target-usable-p target origin))
-                  ad-do-it
+                  (let ((org-link-frame-setup (cons '(file . find-file)
+                                                    org-link-frame-setup)))
+                    ad-do-it)
                 (let ((origin-buf (window-buffer origin))
                       (shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
                                             (window-list nil nil))))
@@ -2576,8 +2619,9 @@ MIN-TO-APP ignored (warning 0).  D-Bus fail falls back to echo."
 ;; all three with zero startup cost and no straight fetch.
 
 ;; 19a. Lorem ipsum — embedded text, no package.
-;;      Paragraph = 4 sentences joined; list = "- sentence" lines.
-;;      Plain = 1 unit, C-u N / M-N = N units.
+;;      Paragraph = 4 random sentences joined; list = "- sentence" lines.
+;;      Each slot sampled independently via built-in `random' (repeats
+;;      allowed).  Plain = 1 unit, C-u N / M-N = N units.
 (defvar nano/lorem-sentences
   '("Lorem ipsum dolor sit amet, consectetur adipiscing elit."
     "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."
@@ -2587,31 +2631,34 @@ MIN-TO-APP ignored (warning 0).  D-Bus fail falls back to echo."
     "Curabitur pretium tincidunt lacus, nec iaculis eros aliquam vitae."
     "Phasellus ullamcorper velit eu nisi malesuada, a scelerisque odio ultrices."
     "Vestibulum ante ipsum primis in faucibus orci luctus et ultrices posuere.")
-  "Classic lorem ipsum sentences cycled by §19 insert commands.")
+  "Classic lorem ipsum sentences sampled randomly by §19 insert commands.")
+
+(defun nano/lorem-random-sentence ()
+  "Return one random sentence from `nano/lorem-sentences'."
+  (nth (random (length nano/lorem-sentences)) nano/lorem-sentences))
 
 (defun nano/insert-lorem-sentences (n)
-  "Insert N lorem ipsum sentences at point.  Bound to SPC i l s."
+  "Insert N random lorem ipsum sentences at point.  Bound to SPC i l s."
   (interactive "p")
   (dotimes (i (or n 1))
-    (insert (nth (% i (length nano/lorem-sentences)) nano/lorem-sentences))
+    (insert (nano/lorem-random-sentence))
     (insert (if (= i (1- (or n 1))) "\n" " "))))
 
 (defun nano/insert-lorem-paragraphs (n)
-  "Insert N lorem ipsum paragraphs (4 sentences each).  SPC i l p."
+  "Insert N random lorem ipsum paragraphs (4 sentences each).  SPC i l p."
   (interactive "p")
   (dotimes (p (or n 1))
     (dotimes (i 4)
-      (insert (nth (% (+ (* p 4) i) (length nano/lorem-sentences))
-                   nano/lorem-sentences))
-      (insert " "))
+      (insert (nano/lorem-random-sentence))
+      (unless (= i 3) (insert " ")))
     (insert "\n")
     (unless (= p (1- (or n 1))) (insert "\n"))))
 
 (defun nano/insert-lorem-list (n)
-  "Insert N lorem ipsum items as \"- sentence\" lines.  SPC i l l."
+  "Insert N random lorem ipsum items as \"- sentence\" lines.  SPC i l l."
   (interactive "p")
-  (dotimes (i (or n 1))
-    (insert "- " (nth (% i (length nano/lorem-sentences)) nano/lorem-sentences) "\n")))
+  (dotimes (_i (or n 1))
+    (insert "- " (nano/lorem-random-sentence) "\n")))
 
 ;; 19b. Password — built-in `random', alnum + symbols.
 ;;      Plain = `nano/password-length', C-u N / M-N = N chars,
@@ -2835,13 +2882,19 @@ With prefix ARG, also copy to kill-ring + clipboard."
 ;;      via `org-roam-node-create :title'.  Stock fido rebinds RET to
 ;;      `icomplete-fido-ret' -> `force-complete-and-exit', coercing a
 ;;      unique name to the first fuzzy match (new entry impossible).
-;;      DWIM: plain RET accepts literal (new node, or exact existing);
-;;      RET after C-j/C-k navigation selects highlighted candidate.
-;;      Other categories delegate to stock `icomplete-fido-ret'.
-;;      `M-j' (`icomplete-fido-exit') and `C-M-j' (force) unchanged.
+;;      DWIM: plain RET exits literal (new node, or exact existing);
+;;      RET after navigation selects highlighted candidate.
+;;      Nav keys: C-j/C-k (§8), C-n/C-p/arrows, C-s/C-r, C-./C-,,
+;;      M-</M-> (vertical goto-first/last).  Other categories delegate
+;;      to stock `icomplete-fido-ret'.  `M-j' (`icomplete-fido-exit')
+;;      and `C-M-j' (force) unchanged.
+;;      NOTE: plain RET must be `exit-minibuffer', NOT
+;;      `minibuffer-complete-and-exit' — the latter expands a new
+;;      prefix to the first flex match on first RET (still forces
+;;      existing), while `exit-minibuffer' preserves the literal.
 (defvar-local nano/org-roam--fido-navigated nil
   "Non-nil when completions rotated in current roam prompt.
-Set by C-j/C-k (nav, §8), consumed by RET DWIM below.")
+Set by nav-key advice, consumed by RET DWIM below.")
 
 (defun nano/org-roam--fido-mark-navigated (&rest _)
   "Flag current minibuffer as navigated for roam RET DWIM."
@@ -2850,29 +2903,32 @@ Set by C-j/C-k (nav, §8), consumed by RET DWIM below.")
     (setq nano/org-roam--fido-navigated t)))
 
 (defun nano/org-roam--fido-setup ()
-  "Reset nav flag on each roam prompt (minibuffer reused across reads)."
-  (when (eq (ignore-errors (icomplete--category)) 'org-roam-node)
-    (setq-local nano/org-roam--fido-navigated nil)))
+  "Reset nav flag on each minibuffer prompt (buffer reused across reads)."
+  (setq-local nano/org-roam--fido-navigated nil))
 
 (defun nano/icomplete-fido-ret-roam-dwim ()
   "RET DWIM for roam: literal (new node) unless navigated.
-Plain RET -> `minibuffer-complete-and-exit' (REQUIRE-MATCH nil,
-so unique name creates node).  After C-j/C-k rotation ->
-`icomplete-force-complete-and-exit' (select highlighted).
-Non-roam minibuffers fall back to `icomplete-fido-ret'."
+Plain RET -> `exit-minibuffer' (literal preserved; REQUIRE-MATCH
+nil, so unique name creates node, exact title opens existing).
+After navigation -> `icomplete-force-complete-and-exit' (select
+highlighted).  Non-roam minibuffers fall back to `icomplete-fido-ret'."
   (interactive)
   (if (eq (ignore-errors (icomplete--category)) 'org-roam-node)
       (if nano/org-roam--fido-navigated
           (progn (setq nano/org-roam--fido-navigated nil)
                  (call-interactively #'icomplete-force-complete-and-exit))
-        (call-interactively #'minibuffer-complete-and-exit))
+        (call-interactively #'exit-minibuffer))
     (call-interactively #'icomplete-fido-ret)))
 
 (with-eval-after-load 'icomplete
   (define-key icomplete-fido-mode-map (kbd "RET") #'nano/icomplete-fido-ret-roam-dwim)
   (define-key icomplete-fido-mode-map (kbd "C-m") #'nano/icomplete-fido-ret-roam-dwim)
   (advice-add 'icomplete-forward-completions :after #'nano/org-roam--fido-mark-navigated)
-  (advice-add 'icomplete-backward-completions :after #'nano/org-roam--fido-mark-navigated))
+  (advice-add 'icomplete-backward-completions :after #'nano/org-roam--fido-mark-navigated)
+  (when (fboundp 'icomplete-vertical-goto-first)
+    (advice-add 'icomplete-vertical-goto-first :after #'nano/org-roam--fido-mark-navigated))
+  (when (fboundp 'icomplete-vertical-goto-last)
+    (advice-add 'icomplete-vertical-goto-last :after #'nano/org-roam--fido-mark-navigated)))
 (add-hook 'minibuffer-setup-hook #'nano/org-roam--fido-setup)
 
 
