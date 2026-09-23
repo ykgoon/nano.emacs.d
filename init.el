@@ -16,7 +16,7 @@
 ;;   §4  SPC leader definition  (native, no general.el)
 ;;   §5  Leader keybindings  (file / buffer / window / quit / search)
 ;;   §6  Window management  (winum, header-line, double/triple columns, uniform widths)
-;;   §7  Theme toggle + persistence + spacemacs-light  (SPC t n)
+;;   §7  Theme toggle + persistence + spacemacs-light/nord-dark faces  (SPC t n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
 ;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
 ;;   §10 Git  (magit + delta, SPC g)
@@ -1042,7 +1042,7 @@ Bound to SPC w =. Runs automatically after splits/deletes."
 (when (fboundp 'nano-refresh-theme)
   (advice-add 'nano-refresh-theme :after #'nano/apply-mode-line-box))
 
-;; 7c. Spacemacs-light emulation — light theme only, dark untouched.
+;; 7c. Spacemacs-light emulation — light only; dark analog in 7c2.
 ;;     Palette = spacemacs-theme.el GUI light column
 ;;     (~/.emacs.d/core/libs/spacemacs-theme/spacemacs-theme.el:111-169).
 ;;     Two hooks on vendored `nano-refresh-theme' (nano-theme.el:790):
@@ -1063,6 +1063,20 @@ Bound to SPC w =. Runs automatically after splits/deletes."
     (cblk . "#655370") (cblk-bg . "#e8e3f0")
     (cblk-ln . "#9380b2") (cblk-ln-bg . "#ddd8eb"))
   "Spacemacs-light GUI hexes used by the §7c overrides.")
+
+;; 7c2. Nord-dark font-lock/org breakout — dark only.
+;;      Dark keeps stock nano-dark base (nano-theme-dark.el) untouched:
+;;      no color remap, modeline/nano-faces unchanged.  Only font-lock +
+;;      org faces are broken out of the flat 4-role aliasing
+;;      (nano-theme.el:130-141) into distinct Nord hues, mirroring the
+;;      information density of 7c.  `keyword' = nord9 = nano salient, so
+;;      the theme identity carries over.
+(defconst nano/nord-dark-palette
+  '((keyword . "#81A1C1") (func . "#88C0D0") (type . "#8FBCBB")
+    (var . "#D8DEE9") (const . "#B48EAD") (str . "#A3BE8C")
+    (comment . "#616E88") (comment-bg . "#3B4252") (doc . "#D08770")
+    (war . "#EBCB8B") (prep . "#5E81AC") (subtle . "#434C5E"))
+  "Nord hexes used by the §7c2 dark breakout.")
 
 (defun nano/remap-spacemacs-light-colors (&rest _)
   "Remap the 9 nano colors to Spacemacs-light when light.
@@ -1133,19 +1147,76 @@ Installed :after `nano-refresh-theme'.  No-op when dark."
       (nano/set-face-maybe 'link :foreground (funcall g 'keyword) :underline t)
       (nano/apply-spacemacs-light-org-faces))))
 
+(defun nano/apply-nord-dark-org-faces ()
+  "Apply Nord-dark org/outline faces.  Safe before org loads."
+  (when (and (boundp 'nano-theme-var) (string= nano-theme-var "dark"))
+    (let ((g (lambda (k) (cdr (assq k nano/nord-dark-palette)))))
+      (nano/set-face-maybe 'org-level-1 :foreground (funcall g 'func) :weight 'bold :height 1.3)
+      (nano/set-face-maybe 'org-level-2 :foreground (funcall g 'str) :weight 'bold :height 1.2)
+      (nano/set-face-maybe 'org-level-3 :foreground (funcall g 'war) :weight 'normal :height 1.1)
+      (nano/set-face-maybe 'org-level-4 :foreground (funcall g 'doc) :weight 'normal)
+      (nano/set-face-maybe 'org-level-5 :foreground (funcall g 'keyword) :weight 'normal)
+      (nano/set-face-maybe 'org-level-6 :foreground (funcall g 'str) :weight 'normal)
+      (nano/set-face-maybe 'org-level-7 :foreground (funcall g 'war) :weight 'normal)
+      (nano/set-face-maybe 'org-level-8 :foreground (funcall g 'doc) :weight 'normal)
+      (nano/set-face-maybe 'outline-1 :foreground (funcall g 'func))
+      (nano/set-face-maybe 'outline-2 :foreground (funcall g 'str))
+      (nano/set-face-maybe 'outline-3 :foreground (funcall g 'war))
+      (nano/set-face-maybe 'outline-4 :foreground (funcall g 'doc))
+      (nano/set-face-maybe 'org-link :foreground (funcall g 'keyword) :underline t :weight 'normal)
+      (nano/set-face-maybe 'org-date :foreground (funcall g 'var) :underline t)
+      (nano/set-face-maybe 'org-todo :foreground (funcall g 'war) :background (funcall g 'subtle) :weight 'bold)
+      (nano/set-face-maybe 'org-done :foreground (funcall g 'str) :background (funcall g 'comment-bg) :weight 'bold)
+      (nano/set-face-maybe 'org-block :foreground (funcall g 'keyword) :background (funcall g 'comment-bg) :extend t)
+      (nano/set-face-maybe 'org-block-begin-line :foreground (funcall g 'type) :background (funcall g 'subtle) :extend t)
+      (nano/set-face-maybe 'org-block-end-line :foreground (funcall g 'type) :background (funcall g 'subtle) :extend t)
+      (nano/set-face-maybe 'org-tag :foreground (funcall g 'doc))
+      (nano/set-face-maybe 'org-special-keyword :foreground (funcall g 'type))
+      (nano/set-face-maybe 'org-meta-line :foreground (funcall g 'doc))
+      (nano/set-face-maybe 'org-document-title :foreground (funcall g 'func) :weight 'bold :height 1.4 :underline t))))
+
+(defun nano/apply-nord-dark-faces (&rest _)
+  "Break out font-lock/org faces to Nord-dark when dark.
+Installed :after `nano-refresh-theme'.  No-op when light."
+  (when (and (boundp 'nano-theme-var) (string= nano-theme-var "dark"))
+    (let ((g (lambda (k) (cdr (assq k nano/nord-dark-palette)))))
+      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg) :slant 'normal :weight 'light)
+      (nano/set-face-maybe 'font-lock-doc-face :foreground (funcall g 'doc))
+      (nano/set-face-maybe 'font-lock-string-face :foreground (funcall g 'str))
+      (nano/set-face-maybe 'font-lock-keyword-face :foreground (funcall g 'keyword) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-builtin-face :foreground (funcall g 'keyword) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-preprocessor-face :foreground (funcall g 'prep))
+      (nano/set-face-maybe 'font-lock-type-face :foreground (funcall g 'type) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-constant-face :foreground (funcall g 'const))
+      (nano/set-face-maybe 'font-lock-variable-name-face :foreground (funcall g 'var))
+      (nano/set-face-maybe 'font-lock-function-name-face :foreground (funcall g 'func) :weight 'bold)
+      (nano/set-face-maybe 'font-lock-warning-face :foreground (funcall g 'war))
+      (nano/set-face-maybe 'link :foreground (funcall g 'keyword) :underline t)
+      (nano/apply-nord-dark-org-faces))))
+
+(defun nano/apply-theme-org-faces ()
+  "Re-apply org faces for the active theme (dispatch by `nano-theme-var')."
+  (if (and (boundp 'nano-theme-var) (string= nano-theme-var "dark"))
+      (nano/apply-nord-dark-org-faces)
+    (nano/apply-spacemacs-light-org-faces)))
+
 ;; Re-apply org faces when org loads later (toggle state read live).
 (with-eval-after-load 'org
-  (nano/apply-spacemacs-light-org-faces))
+  (nano/apply-theme-org-faces))
 
 (when (fboundp 'nano-refresh-theme)
   (advice-add 'nano-refresh-theme :before #'nano/remap-spacemacs-light-colors)
-  (advice-add 'nano-refresh-theme :after #'nano/apply-spacemacs-light-faces))
+  (advice-add 'nano-refresh-theme :after #'nano/apply-spacemacs-light-faces)
+  (advice-add 'nano-refresh-theme :after #'nano/apply-nord-dark-faces))
 
 ;; `nano/theme-restore' above already refreshed with stock colors;
-;; re-refresh once so faces derive from the remapped palette.
-(when (and (boundp 'nano-theme-var) (string= nano-theme-var "light")
-           (fboundp 'nano-refresh-theme))
-  (nano-refresh-theme))
+;; light: re-refresh once so faces derive from the remapped palette.
+;; dark: stock faces already derived, just apply the 7c2 breakout.
+(cond ((and (boundp 'nano-theme-var) (string= nano-theme-var "light")
+            (fboundp 'nano-refresh-theme))
+       (nano-refresh-theme))
+      ((and (boundp 'nano-theme-var) (string= nano-theme-var "dark"))
+       (nano/apply-nord-dark-faces)))
 
 (defun nano/trailing-whitespace-inhibit-p ()
   "Non-nil when current buffer should skip trailing-whitespace highlight."
