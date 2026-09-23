@@ -2,7 +2,7 @@
 ;;; Commentary:
 ;; Single-file config for rougier/nano-emacs, managed by straight.el.
 ;; Launch with: emacs --init-directory ~/nano.emacs.d
-;; Restart required after edits (no live reloader).
+;; Edits: SPC f e r reloads in-place; font/boot changes need SPC q r.
 ;; See AGENTS.md for layout/gotchas.
 
 ;;; Code:
@@ -31,11 +31,12 @@
 ;;   §19  Insert  (SPC i, zero-dep lorem / password / uuid v4)
 ;;   §20  Markdown  (markdown-mode + gfm, SPC m / ,, lazy)
 ;;   §21  Roam  (org-roam + sqlite-builtin, , r / SPC o, lazy)
-;;   §22  Update  (float latest, SPC f e U pull+rebuild)
+;;   §22  Update  (float latest, SPC f e U pull+rebuild; SPC f e r reload init)
 ;;   §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
 ;;   §24  Select  (expand-region, SPC v, lazy)
 ;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
 ;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
+;;   §27  OpenCode  (codeberg/sczi, SPC a c, lazy)
 ;; =====================================================================
 
 
@@ -501,6 +502,21 @@ Fresh buffer defaults to `org-mode'."
 (make-directory desktop-dirname t)
 (desktop-save-mode 1)
 
+;; `desktop-kill' (kill-emacs-query-functions) re-saves at kill; on desktop
+;; conflict it errors ("Desktop file conflict") and aborts the quit.  Advice:
+;; never abort — skip save on conflict / any error, still release the lock.
+(defun nano/desktop-kill-tolerant (orig)
+  "Like `desktop-kill' but never blocks quitting.
+Skipped too when quit-time save already failed (same failure twice)."
+  (if nano/desktop-save-failed
+      (desktop--on-kill)
+    (condition-case err
+        (funcall orig)
+      (error (message "Desktop save skipped (%s)" (cadr err)))))
+  t)
+
+(advice-add 'desktop-kill :around #'nano/desktop-kill-tolerant)
+
 (defun nano/desktop-ensure-dir ()
   "Return desktop dir, creating it.  Never nil — avoids `Directory:' prompt.
 `desktop-save-in-desktop-dir' falls back to interactive `desktop-save'
@@ -510,10 +526,20 @@ when `desktop-dirname' is nil; explicit dir here keeps quit silent."
     (setq desktop-dirname dir)
     dir))
 
+(defvar nano/desktop-save-failed nil
+  "Non-nil when desktop save failed at quit; kill-hook re-save then skipped.")
+
 (defun nano/desktop-save-silently ()
-  "Non-interactive desktop save.  Never prompts for directory."
+  "Non-interactive desktop save.  Never prompts for directory.
+On desktop conflict (file changed since load / other instance) skip
+instead of overwriting; quit still proceeds."
+  (setq nano/desktop-save-failed nil)
   (let ((desktop-save t))
-    (desktop-save (nano/desktop-ensure-dir))))
+    (condition-case err
+        (desktop-save (nano/desktop-ensure-dir))
+      (error
+       (setq nano/desktop-save-failed t)
+       (message "Desktop save skipped (%s)" (cadr err))))))
 
 (defun nano/restart-emacs-restore ()
   "Save desktop session, then restart.  Bound to SPC q r."
@@ -524,7 +550,7 @@ when `desktop-dirname' is nil; explicit dir here keeps quit silent."
 
 (defun nano/quit-save-silently ()
   "Save desktop silently, then quit (still prompts for unsaved files).
-Bound to SPC q q."
+Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
   (interactive)
   (nano/desktop-save-silently)
   (let ((desktop-save t)) ; kill-hook re-save also silent
@@ -601,7 +627,10 @@ Bound to SPC q q."
 (define-key winum-keymap (kbd "M-9") 'winum-select-window-9)
 
 ;; 6b. Modeline sections — Spacemacs blocks, bottom bar only
-;;     Layout: [N] [E] [RO/RW/**/>< /@host] filename (detail) ... [sel|position] <workspace> %p
+;;     Layout: [N] [E] [RO/RW/**/>< /@host] filename (detail) ... [proc|sel|position] <workspace> %p
+;;     `proc' = buffer-local `mode-line-process' (opencode session
+;;     status: agent/model/context%/⏳🚀), rendered far right only in
+;;     buffers that set it (nano/compose drops that standard slot).
 ;;     Redefines `nano-modeline-compose' (same signature, so every mode
 ;;     benefits) instead of patching nano source.  Single auto-named tab
 ;;     tracks the buffer name, which used to render `<init.el> ... init.el'
@@ -719,6 +748,19 @@ which duplicated the filename in the modeline."
   "Return scroll percent string for current buffer/window."
   (format-mode-line "%p"))
 
+;; Render `mode-line-process' (e.g. opencode session status, a
+;; (:eval ...) template set by packages) to a string.  Hand-evaluated:
+;; `format-mode-line' silently DROPS :eval constructs, so standard
+;; packages using `mode-line-process' would vanish from the nano
+;; modeline.  Mirrors redisplay semantics: dynamic eval, errors → nil.
+(defun nano/modeline--render-process ()
+  "Return string for buffer-local `mode-line-process', or nil."
+  (when-let ((mlp mode-line-process))
+    (cond ((stringp mlp) mlp)
+          ((and (eq (car-safe mlp) :eval) (= (length mlp) 2))
+           (ignore-errors (eval (cadr mlp) nil)))
+          (t (ignore-errors (format-mode-line mlp))))))
+
 ;; Drop the old status-prefix advice on reload; the redefinition below
 ;; renders winum + workspace as their own blocks instead.
 (advice-remove 'nano-modeline-compose 'nano-winum-prefix)
@@ -742,6 +784,12 @@ Drops low-priority blocks on narrow columns; selection replaces position."
            (secondary-base (or sel secondary))
            (secondary-eff (if (or sel (>= ww nano/modeline-truncate-secondary-width))
                               secondary-base ""))
+           ;; opencode session block: buffer-local `mode-line-process'
+           ;; holds (:eval (opencode--session-status-indicator)) in
+           ;; session buffers (agent/model/context%/⏳🚀).  Rendered far
+           ;; right, mirroring upstream.  Nil in every other buffer,
+           ;; so this is a no-op there.
+           (proc (nano/modeline--render-process))
            (active (nano/modeline-selected-p))
            ;; RO/RW both faded grey, ** critical.
            (prefix (let* ((code (cond ((string-suffix-p "RO" status) "RO")
@@ -785,12 +833,15 @@ Drops low-priority blocks on narrow columns; selection replaces position."
             (pct (propertize (string-replace "%" "%%" pct-text)
                            'face 'nano-face-header-default
                            'display `(raise ,space-up)))
-            (right (concat secondary-eff
+            ;; proc goes first (far right); prepended in both so filler
+            ;; width math stays exact.  Indicator text contains %% which
+            ;; collapses to % on the single outer %-expansion.
+            (right (concat (or proc "") secondary-eff
                            (propertize " " 'face 'nano-face-header-default
                                        'display `(raise ,space-down))
                            (or ws "")
                            pct))
-            (right-for-width (concat secondary-eff
+            (right-for-width (concat (or proc "") secondary-eff
                                      (propertize " " 'face 'nano-face-header-default
                                                  'display `(raise ,space-down))
                                      (or ws "")
@@ -1439,28 +1490,62 @@ Spacemacs nth/new parity — tab-bar is gapless, so N past end appends."
 ;; already satisfy evil-collection requirements.
 ;; Lazy (zero startup cost): collection builds on first magit/elfeed
 ;; use via straight autoloads.  Pre-seed states NOW (cheap setqs,
-;; evil already loaded in §3) so the FIRST status buffer lands in
-;; motion, not emacs — deferring the seed until after magit loads
-;; stuck the first buffer in emacs state (SPC + j/k dead, "unusable").
-;; Keymaps are global, so late `evil-collection-init' still fixes keys
-;; in existing buffers; only the state seed is timing-sensitive.
+;; evil already loaded in §3) so the FIRST status buffer never lands
+;; in emacs state (SPC + j/k dead, "unusable") even if collection
+;; setup is delayed or skipped — see `nano/evil-collection-ensure',
+;; which re-seeds to normal after collection init (its j/k/s keymaps
+;; are normal-state, so normal is the one state that always works).
 (straight-use-package 'evil-collection)
 (dolist (m '(magit-status-mode magit-log-mode magit-diff-mode
              magit-reflog-mode magit-refs-mode magit-revision-mode
              magit-stash-mode magit-stashes-mode magit-cherry-mode
-             magit-process-mode git-rebase-mode
-             elfeed-search-mode elfeed-show-mode))
-  (evil-set-initial-state m (if (memq m '(elfeed-search-mode elfeed-show-mode))
-                               'normal 'motion)))
-(setq evil-collection-mode-list '(magit elfeed))
+             magit-process-mode git-rebase-mode))
+  ;; normal, not motion: collection's magit keymaps (incl. `s' stage)
+  ;; bind normal/visual only; motion would leave `s' dead pre-collection.
+  (evil-set-initial-state m 'normal))
+(dolist (m '(elfeed-search-mode elfeed-show-mode))
+  (evil-set-initial-state m 'normal))
+(setq evil-collection-mode-list '(magit magit-section elfeed))
 (defvar nano/evil-collection-initialized nil
   "Non-nil once `evil-collection-init' ran (magit/elfeed share one init).")
+(defvar nano/evil-collection-retries 0
+  "Guard against infinite retries in `nano/evil-collection-ensure'.")
 (defun nano/evil-collection-ensure ()
-  "Init evil-collection once for `evil-collection-mode-list'.  Lazy entry."
+  "Init evil-collection once for `evil-collection-mode-list'.  Lazy entry.
+Explicit `require' + setup call (no bare autoload reliance): the
+collection's own with-eval-after-load block only fires when the
+feature loads, so if setup ever silently skipped (failed autoload,
+skewed rebuild), magit buffers landed in emacs state — j/k/s dead.
+Deterministic here: load collection, run setup directly, then
+re-assert evil states (collection re-seeds magit modes to
+`evil-collection-magit-state' = normal, overriding our §10 motion
+seed; final state must match its keymaps, which bind j/k/s for
+normal).  One retry on failure, then warn."
   (unless nano/evil-collection-initialized
-    (when (require 'evil-collection nil t)
-      (evil-collection-init evil-collection-mode-list)
-      (setq nano/evil-collection-initialized t))))
+    (if (>= nano/evil-collection-retries 2)
+        (warn "evil-collection init failed; magit/elfeed keys fallback to evil defaults")
+      (setq nano/evil-collection-retries (1+ nano/evil-collection-retries))
+      (if (not (require 'evil-collection nil t))
+          (warn "evil-collection not loadable — magit/elfeed stay plain evil")
+        (evil-collection-init evil-collection-mode-list)
+        (setq nano/evil-collection-initialized t)
+        ;; Re-assert post-collection states.  Collection magit keys
+        ;; (j/k/s/…) are defined for normal/visual via
+        ;; `evil-collection-magit-state'; seed normal so first magit
+        ;; buffer is immediately usable.
+        (dolist (m '(magit-status-mode magit-log-mode magit-diff-mode
+                     magit-reflog-mode magit-refs-mode magit-revision-mode
+                     magit-stash-mode magit-stashes-mode magit-cherry-mode
+                     magit-process-mode git-rebase-mode))
+          (evil-set-initial-state m 'normal))
+        ;; Existing magit buffers stuck in a dead state get healed.
+        (dolist (buf (buffer-list))
+          (with-current-buffer buf
+            (when (and (derived-mode-p 'magit-mode)
+                       (memq evil-state '(emacs insert)))
+              (evil-motion-state))))))
+    (when nano/evil-collection-initialized
+      (setq nano/evil-collection-retries 0))))
 (with-eval-after-load 'magit (nano/evil-collection-ensure))
 (with-eval-after-load 'elfeed-search (nano/evil-collection-ensure))
 
@@ -3004,7 +3089,7 @@ highlighted).  Non-roam minibuffers fall back to `icomplete-fido-ret'."
 
 
 ;; ---------------------------------------------------------------------
-;; §22  Update  (float latest, SPC f e U pull+rebuild)
+;; §22  Update/Reload  (SPC f e U pull+rebuild, SPC f e r reload init)
 ;; ---------------------------------------------------------------------
 ;; Spacemacs `SPC f e U' parity.  Floats latest, no lockfile.
 ;; `straight-pull-all' = fetch+merge only, then `straight-rebuild-all'
@@ -3017,9 +3102,26 @@ highlighted).  Non-roam minibuffers fall back to `icomplete-fido-ret'."
   (straight-rebuild-all)
   (message "Packages updated.  Restart with SPC q r."))
 (define-key spacemacs-leader-map (kbd "f e U") 'nano/update-packages)
+
+;; Reload init.el in-place — no restart needed for most edits.
+;; File is written reload-safe: stale advice/hooks removed before
+;; re-adding (init.el:741, init.el:838), keymaps/hooks/advice idempotent.
+;; NOT re-applied: §2 font vars — `(require 'nano)' is a no-op after
+;; first load, so set-before-require appearance needs SPC q r.
+(defun nano/reload-init ()
+  "Re-execute init.el (`user-init-file').  Bound to SPC f e r.
+Covers bindings, defuns, setq, modeline, keymaps.  Font/theme-boot
+changes still need SPC q r (nano load order)."
+  (interactive)
+  (message "Reloading init.el...")
+  (load (or user-init-file (locate-user-emacs-file "init.el"))
+        nil 'nomessage)
+  (message "init.el reloaded.  Font/boot changes still need SPC q r."))
+(define-key spacemacs-leader-map (kbd "f e r") 'nano/reload-init)
 (which-key-add-key-based-replacements
   "SPC f e" "emacs/config"
-  "SPC f e U" "update packages")
+  "SPC f e U" "update packages"
+  "SPC f e r" "reload init")
 
 ;; ---------------------------------------------------------------------
 ;; §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
@@ -3478,6 +3580,171 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 
 (define-key spacemacs-leader-map (kbd "a a") 'animal-spirit)
 (which-key-add-key-based-replacements "SPC a a" "animal spirit")
+
+
+;; ---------------------------------------------------------------------
+;; §27  OpenCode  (codeberg/sczi, SPC a c, lazy)
+;; ---------------------------------------------------------------------
+;; Emacs UI for the opencode AI agent (https://opencode.ai/).  straight
+;; supports :host codeberg (straight.el:3875).  Package-Requires pulls
+;; plz / plz-media-type / plz-event-source from MELPA; magit (§10) and
+;; markdown-mode (§20) already vendored.  Needs `opencode' binary on
+;; PATH (server auto-starts headless on first use).
+;;
+;; Lazy, zero startup cost: package only autoloads `opencode' itself
+;; (single ;;;###autoload); all other commands lack markers, so this
+;; section declares its own autoloads (§26 animal-spirit pattern),
+;; pointing at the umbrella "opencode" feature which requires all
+;; sub-modules (api/common/sessions/...).  First SPC a c press loads
+;; the package + magit once, then nothing.
+;;
+;; Session-buffer commands surface via curated `,' / `SPC m' menus
+;; (§16b infra, opencode-session-mode + opencode-session-control-mode);
+;; package's own keymaps stay intact (C-c C-y yank, C-c C-c cancel,
+;; TAB agent cycle, ...).  `,' is evil-normal/visual/motion only —
+;; insert state untouched so `,` types literally in the comint prompt.
+;; `add-region' errors without an active region.
+;;
+;; Session modeline block (agent/model/context%/⏳🚀) rides on the
+;; package's buffer-local `mode-line-process'; §6b compose renders it
+;; far right (stock nano modeline would drop that slot).
+
+(straight-use-package
+ '(opencode :type git :host codeberg :repo "sczi/opencode.el"))
+
+(dolist (cmd '(opencode-new-session opencode-select-open-session
+               opencode-select-project opencode-select-idle
+               opencode-visit-last-idle opencode-add-buffer-dwim
+               opencode-add-file-dwim opencode-add-region
+               opencode-new-worktree opencode-connect opencode-disconnect
+               opencode-add-file opencode-add-subagent
+               opencode-insert-slash-command opencode-cycle-session-agent
+               opencode-select-model opencode-select-variant
+               opencode-toggle-mcp opencode-yank-code-block
+               opencode-copy-conversation opencode-scroll-to-last-response-start
+               opencode-abort-session opencode-respond-permission
+               opencode-select-session opencode-select-child-session
+               opencode-open-parent opencode-rename-session
+               opencode-kill-session opencode-fork-session
+               opencode-compact-session opencode-share-session
+               opencode-unshare-session opencode-unshare-all-sessions
+               opencode-delete-message opencode-revert-message
+               opencode-unrevert-all opencode-sessions-redisplay
+               opencode-session-control-toggle-verbose))
+  (autoload cmd "opencode" nil t))
+
+(define-key spacemacs-leader-map (kbd "a c o") 'opencode)
+(define-key spacemacs-leader-map (kbd "a c n") 'opencode-new-session)
+(define-key spacemacs-leader-map (kbd "a c s") 'opencode-select-open-session)
+(define-key spacemacs-leader-map (kbd "a c P") 'opencode-select-project)
+(define-key spacemacs-leader-map (kbd "a c i") 'opencode-select-idle)
+(define-key spacemacs-leader-map (kbd "a c l") 'opencode-visit-last-idle)
+(define-key spacemacs-leader-map (kbd "a c b") 'opencode-add-buffer-dwim)
+(define-key spacemacs-leader-map (kbd "a c f") 'opencode-add-file-dwim)
+(define-key spacemacs-leader-map (kbd "a c r") 'opencode-add-region)
+(define-key spacemacs-leader-map (kbd "a c w") 'opencode-new-worktree)
+(define-key spacemacs-leader-map (kbd "a c C") 'opencode-connect)
+(define-key spacemacs-leader-map (kbd "a c x") 'opencode-disconnect)
+(which-key-add-key-based-replacements
+  "SPC a c" "opencode"
+  "SPC a c o" "open sessions"
+  "SPC a c n" "new session"
+  "SPC a c s" "select open session"
+  "SPC a c P" "select project"
+  "SPC a c i" "select idle session"
+  "SPC a c l" "last notified session"
+  "SPC a c b" "add buffer to context"
+  "SPC a c f" "add file to context"
+  "SPC a c r" "add region to context"
+  "SPC a c w" "new worktree session"
+  "SPC a c C" "connect (manual)"
+  "SPC a c x" "disconnect")
+
+;; 27b. Curated `,' / `SPC m' menus — session buffer + Sessions panel.
+;; Grouped mnemonics; package's own C-c map stays parallel.  Autoloads
+;; above make every leaf resolvable pre-load.  `,s' session / `,d'
+;; message ops; sh = select from project history (`ss' = open buffers).
+(nano/declare-major-prefix 'opencode-session-mode "s" "session")
+(nano/declare-major-prefix 'opencode-session-mode "d" "message")
+(nano/set-leader-keys-for-major-mode 'opencode-session-mode
+                                     "sn" 'opencode-new-session
+                                     "ss" 'opencode-select-open-session
+                                     "sh" 'opencode-select-session
+                                     "si" 'opencode-select-idle
+                                     "sl" 'opencode-visit-last-idle
+                                     "sc" 'opencode-select-child-session
+                                     "sp" 'opencode-open-parent
+                                     "sr" 'opencode-rename-session
+                                     "sk" 'opencode-kill-session
+                                     "sf" 'opencode-fork-session
+                                     "sC" 'opencode-compact-session
+                                     "sx" 'opencode-share-session
+                                     "su" 'opencode-unshare-session
+                                     "sU" 'opencode-unshare-all-sessions
+                                     "dd" 'opencode-delete-message
+                                     "dr" 'opencode-revert-message
+                                     "du" 'opencode-unrevert-all
+                                     "a"  'opencode-cycle-session-agent
+                                     "A"  'opencode-add-subagent
+                                     "m"  'opencode-select-model
+                                     "v"  'opencode-select-variant
+                                     "M"  'opencode-toggle-mcp
+                                     "i"  'opencode-insert-slash-command
+                                     "f"  'opencode-add-file
+                                     "F"  'opencode-add-file-dwim
+                                     "b"  'opencode-add-buffer-dwim
+                                     "r"  'opencode-add-region
+                                     "y"  'opencode-yank-code-block
+                                     "Y"  'opencode-copy-conversation
+                                     "t"  'opencode-scroll-to-last-response-start
+                                     "x"  'opencode-abort-session
+                                     "p"  'opencode-respond-permission)
+(which-key-add-keymap-based-replacements
+  (nano/major-mode-leader-map 'opencode-session-mode)
+  "sn" "new session" "ss" "open sessions"
+  "sh" "select session (history)" "si" "select idle"
+  "sl" "last notified idle" "sc" "child session"
+  "sp" "open parent" "sr" "rename"
+  "sk" "kill" "sf" "fork (at point)"
+  "sC" "compact" "sx" "share"
+  "su" "unshare" "sU" "unshare all"
+  "dd" "delete at point" "dr" "revert edits"
+  "du" "unrevert all"
+  "a" "cycle agent" "A" "add subagent"
+  "m" "select model" "v" "select variant"
+  "M" "toggle MCP" "i" "insert slash command"
+  "f" "add file" "F" "add file dwim"
+  "b" "add buffer" "r" "add region"
+  "y" "yank code block" "Y" "copy conversation"
+  "t" "scroll last response" "x" "abort session"
+  "p" "respond permission")
+
+(nano/declare-major-prefix 'opencode-session-control-mode "s" "session")
+(nano/set-leader-keys-for-major-mode 'opencode-session-control-mode
+                                     "r"  'opencode-sessions-redisplay
+                                     "n"  'opencode-new-session
+                                     "M"  'opencode-toggle-mcp
+                                     "U"  'opencode-unshare-all-sessions
+                                     "v"  'opencode-session-control-toggle-verbose
+                                     "ss" 'opencode-select-open-session
+                                     "si" 'opencode-select-idle
+                                     "sl" 'opencode-visit-last-idle)
+(which-key-add-keymap-based-replacements
+  (nano/major-mode-leader-map 'opencode-session-control-mode)
+  "r" "redisplay" "n" "new session"
+  "M" "toggle MCP" "U" "unshare all"
+  "v" "toggle verbose" "ss" "open sessions"
+  "si" "select idle" "sl" "last notified idle")
+
+(defun nano/opencode-setup-major-leader ()
+  "Activate curated `,' / `SPC m' map in opencode session buffers."
+  (nano/activate-major-leader-locally 'opencode-session-mode))
+(defun nano/opencode-control-setup-major-leader ()
+  "Activate curated `,' / `SPC m' map in the Sessions panel buffer."
+  (nano/activate-major-leader-locally 'opencode-session-control-mode))
+(add-hook 'opencode-session-mode-hook #'nano/opencode-setup-major-leader)
+(add-hook 'opencode-session-control-mode-hook
+          #'nano/opencode-control-setup-major-leader)
 
 ;;; init.el ends here
 (custom-set-variables
