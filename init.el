@@ -244,16 +244,31 @@
 (define-key spacemacs-leader-map (kbd "f f") 'find-file)
 (define-key spacemacs-leader-map (kbd "f s") 'save-buffer)
 (define-key spacemacs-leader-map (kbd "f S") 'evil-write-all) ; Spacemacs parity (:wa, silent, no prompt)
-(define-key spacemacs-leader-map (kbd "f r") 'recentf-open-files)
+(define-key spacemacs-leader-map (kbd "f r") 'nano/find-recent-file)
 (define-key spacemacs-leader-map (kbd "f D") 'nano/delete-current-buffer-file)
 (define-key spacemacs-leader-map (kbd "f R") 'nano/rename-current-buffer-file)
 (define-key spacemacs-leader-map (kbd "f c") 'nano/copy-current-buffer-file)
 (which-key-add-key-based-replacements
+  "SPC f f" "find file"
+  "SPC f r" "recent files"
   "SPC f s" "save file"
   "SPC f S" "save all"
   "SPC f c" "copy file"
   "SPC f D" "delete file"
   "SPC f R" "rename file")
+
+(defun nano/find-recent-file (&optional arg)
+  "Open recent file via minibuffer completion, like SPC f f.  Bound to SPC f r.
+Type to filter; empty input lists all (fido-vertical, §8).
+With prefix ARG, open old widget dialog (`recentf-open-files')."
+  (interactive "P")
+  (unless recentf-mode (recentf-mode 1))
+  (if arg
+      (call-interactively #'recentf-open-files)
+    (if (null recentf-list)
+        (user-error "No recent files")
+      (funcall recentf-menu-action
+               (completing-read "Open recent file: " recentf-list nil t)))))
 
 (defun nano/delete-current-buffer-file (&optional arg)
   "Delete file visited by current buffer, then kill buffer.  Bound to SPC f D.
@@ -2494,11 +2509,28 @@ open-then-move (link context stays in origin); scratch invisible
 (defun nano/org-strike-through () "Strike region/word via `org-emphasize' +.  `, xs'." (interactive) (org-emphasize ?+))
 (defun nano/org-underline () "Underline region/word via `org-emphasize' _.  `, xu'." (interactive) (org-emphasize ?_))
 (defun nano/org-verbatim () "Verbatim region/word via `org-emphasize' =.  `, xv'." (interactive) (org-emphasize ?=))
+(defun nano/org-insert-checkbox-item ()
+  "Insert unchecked checkbox `- [ ]'.  Bound to `, i c' / `SPC m i c'.
+DWIM: plain list item without box -> add `[ ]' in place via
+`org-toggle-checkbox' with prefix; on box item -> new `- [ ]'
+below via `org-insert-item'; off-list -> fresh `- [ ] ' on empty
+line, else newline then `- [ ] '.  Ends in evil insert state.
+Example: `- foo' -> `- [ ] foo'; empty line -> `- [ ] '."
+  (interactive)
+  (cond ((and (org-at-item-p) (not (org-at-item-checkbox-p)))
+         (org-toggle-checkbox '(4)))
+        ((org-insert-item t))
+        ((save-excursion (beginning-of-line) (looking-at-p "[ \t]*$"))
+         (beginning-of-line) (skip-chars-forward " \t") (insert "- [ ] "))
+        (t (end-of-line) (newline) (insert "- [ ] ")))
+  (when (fboundp 'evil-insert-state)
+    (evil-insert-state 1)))
 (nano/declare-major-prefix 'org-mode "x" "text")
 (nano/set-leader-keys-for-major-mode 'org-mode
-                                     "t" 'org-todo           ; cycle TODO->NEXT->DONE
-                                     "R" 'nano/org-random-current-buffer ; random headline, current buffer only
-                                     "xb" 'nano/org-bold
+                                      "t" 'org-todo           ; cycle TODO->NEXT->DONE
+                                      "R" 'nano/org-random-current-buffer ; random headline, current buffer only
+                                      "ic" 'nano/org-insert-checkbox-item ; unchecked `- [ ]' DWIM
+                                      "xb" 'nano/org-bold
                                      "xc" 'nano/org-code
                                      "xi" 'nano/org-italic
                                      "xo" 'nano/org-open-at-point-in-scratch-window ; moved from `, o'
@@ -2509,6 +2541,7 @@ open-then-move (link context stays in origin); scratch invisible
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'org-mode)
   "t" "todo cycle" "R" "random note (buffer)"
+  "ic" "insert checkbox"
   "xb" "bold" "xc" "code" "xi" "italic" "xo" "open link"
   "xr" "clear emphasis" "xs" "strike-through"
   "xu" "underline" "xv" "verbatim")
