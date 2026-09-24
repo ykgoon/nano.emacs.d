@@ -522,14 +522,14 @@ Fresh buffer defaults to `org-mode'."
 ;; nil); kill-hook re-save also silent.  Restart keeps --init-directory
 ;; since builtin `restart-emacs' re-execs same argv.
 ;; Tab-bar MUST be on BEFORE `desktop-save-mode' reads, else frameset
-;; restores without tabs (workspaces lost).
-(require 'tab-bar)
+;; restores without tabs (workspaces lost).  Both autoload; no `require'.
 (tab-bar-mode 1)
 ;; NOTE: plain setq on `tab-bar-show' does NOT take effect — custom :set
 ;; refreshes `tab-bar-lines'.  Full tab-bar config lives in §9; this
 ;; early hide keeps first frame clean before §9 re-asserts.
 (customize-set-variable 'tab-bar-show nil)
-(require 'desktop)
+;; No `require' desktop: `desktop-save-mode' autoloads; vars set first
+;; (defcustom keeps pre-set values on load).
 (setq desktop-dirname (locate-user-emacs-file "var/desktop")
       desktop-path (list desktop-dirname)
       desktop-save t
@@ -620,8 +620,9 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
     (nano/org-agenda-refresh-files))
   (org-agenda-list)
   (get-buffer org-agenda-buffer-name))
-(add-to-list 'desktop-buffer-mode-handlers
-             '(org-agenda-mode . nano/desktop-restore-org-agenda))
+(with-eval-after-load 'desktop
+  (add-to-list 'desktop-buffer-mode-handlers
+               '(org-agenda-mode . nano/desktop-restore-org-agenda)))
 (with-eval-after-load 'desktop
   (add-hook 'org-agenda-mode-hook
             (lambda () (setq-local desktop-save-buffer t))))
@@ -743,14 +744,19 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
 
 ;; Selection info. Replaces position with L:C while region is active.
 (defun nano/modeline-selection-string ()
-  "Return propertized ` L:C ' block when region active, else nil."
+  "Return propertized ` L:C ' block when region active, else nil.
+Skips `count-lines' on huge regions (>50k chars); chars still show."
   (when (use-region-p)
     (ignore-errors
       (let* ((rb (region-beginning))
              (re (region-end))
-             (lines (count-lines rb re))
-             (chars (- re rb)))
-        (propertize (format " %dL:%dC " lines chars)
+             (chars (- re rb))
+             (lines (if (> chars 50000)
+                        -1
+                      (count-lines rb re))))
+        (propertize (if (< lines 0)
+                        (format " %dC " chars)
+                      (format " %dL:%dC " lines chars))
                     'face 'nano-face-header-default)))))
 
 ;; Responsive truncation. Narrow columns drop ws, primary, static position first.
@@ -824,12 +830,12 @@ Drops low-priority blocks on narrow columns; selection replaces position."
            (secondary-base (or sel secondary))
            (secondary-eff (if (or sel (>= ww nano/modeline-truncate-secondary-width))
                               secondary-base ""))
-           ;; opencode session block: buffer-local `mode-line-process'
-           ;; holds (:eval (opencode--session-status-indicator)) in
-           ;; session buffers (agent/model/context%/⏳🚀).  Rendered far
-           ;; right, mirroring upstream.  Nil in every other buffer,
-           ;; so this is a no-op there.
-           (proc (nano/modeline--render-process))
+            ;; opencode session block: buffer-local `mode-line-process'
+            ;; holds (:eval (opencode--session-status-indicator)) in
+            ;; session buffers (agent/model/context%/⏳🚀).  Rendered far
+            ;; right, mirroring upstream.  Nil in every other buffer,
+            ;; so this is a no-op there.  Guarded: skip funcall unless set.
+            (proc (when mode-line-process (nano/modeline--render-process)))
            (active (nano/modeline-selected-p))
            ;; RO/RW both faded grey, ** critical.
            (prefix (let* ((code (cond ((string-suffix-p "RO" status) "RO")
@@ -886,9 +892,9 @@ Drops low-priority blocks on narrow columns; selection replaces position."
                                                  'display `(raise ,space-down))
                                      (or ws "")
                                      pct-display))
-            (available-width (- (window-total-width)
-                                (length head) (length right-for-width)
-                                (/ (window-right-divider-width) char-width)))
+            (available-width (- ww
+                                 (length head) (length right-for-width)
+                                 (/ (window-right-divider-width) char-width)))
            (available-width (max 1 available-width)))
       (concat head
               (propertize (make-string available-width ?\ )
@@ -1038,8 +1044,10 @@ Bound to SPC w =. Runs automatically after splits/deletes."
     (ignore-errors (nano/balance-window-widths-1 root))))
 
 (defun nano/balance-widths-after-split (&rest _)
-  "Advice target: rebalance widths after split/delete. Skips minibuffer."
-  (unless (window-minibuffer-p (selected-window))
+  "Advice target: rebalance widths after split/delete.
+Skips minibuffer and single-window frames (nothing to equalize)."
+  (unless (or (window-minibuffer-p (selected-window))
+              (<= (length (window-list nil nil)) 1))
     (nano/balance-window-widths)))
 
 (advice-add 'split-window-right :after #'nano/balance-widths-after-split)
@@ -1060,7 +1068,7 @@ Bound to SPC w =. Runs automatically after splits/deletes."
 ;; and adds echo feedback.  Lightweight, no extra package.
 ;; Choice persists in plain-text `nano/theme-state-file', restored on
 ;; next launch (skipped when explicit -dark/-light/-default CLI flag).
-(require 'subr-x) ; string-trim for state file read (built-in)
+;; No `require' subr-x: `string-trim' autoloads, zero startup cost.
 
 (defvar nano/theme-state-file
   (locate-user-emacs-file "var/nano-theme")
@@ -1321,8 +1329,7 @@ Installed :after `nano-refresh-theme'.  No-op when light."
 
 (add-hook 'after-change-major-mode-hook #'nano/disable-trailing-whitespace-maybe)
 (add-hook 'read-only-mode-hook #'nano/disable-trailing-whitespace-maybe)
-(dolist (b (buffer-list))
-  (with-current-buffer b (nano/disable-trailing-whitespace-maybe)))
+;; No boot-time buffer loop: hooks cover new buffers; saves O(buffers) startup.
 
 (defun nano/toggle-trailing-whitespace ()
   "Toggle trailing-whitespace highlight in editable buffers.  Bound to SPC t w.
@@ -1361,6 +1368,11 @@ Exempt buffers (read-only / special-mode) stay off when enabling."
       completion-cycle-threshold 3)
 ;; History: recentf backs SPC f r (bound in §5, mode was off);
 ;; savehist persists M-x / file / buffer histories across restarts.
+;; Caps keep memory + disk small: 50 recent files, no histories pileup.
+(setq recentf-max-saved-items 50
+      recentf-exclude '("/tmp/" "/ssh:" "/sudo:")
+      savehist-additional-variables nil
+      history-length 100)
 (recentf-mode 1)
 (savehist-mode 1)
 ;; C-n/C-p + arrows come free with icomplete-vertical-mode; add C-j/C-k
@@ -1379,7 +1391,7 @@ Exempt buffers (read-only / special-mode) stay off when enabling."
 ;; with own window config.  Zero-dep (Emacs 30 built-in), no persp-mode /
 ;; eyebrowse.  Top tab bar stays hidden (`tab-bar-show' nil reclaims the
 ;; row); the name shows far-right in the bottom modeline (§6b), Spacemacs-style.
-(require 'tab-bar)
+;; No `require': `tab-bar-mode' autoloaded (§5d already enabled it).
 (tab-bar-mode 1) ; already on via §5d (before desktop read); idempotent here.
 ;; NOTE: plain setq on `tab-bar-show' does NOT take effect — it has a
 ;; custom :set that refreshes `tab-bar-lines' on all frames.  Must use
@@ -1772,7 +1784,7 @@ need one `q' per buffer before the transient exits."
 ;; ---------------------------------------------------------------------
 ;; Zero-dep: Emacs 30 built-in, detects .git roots, works with
 ;; fido-vertical from §8.  No projectile (heavier, caching daemon).
-(require 'project)
+;; No `require': project commands autoload on first SPC p use.
 
 (define-key spacemacs-leader-map (kbd "p f") 'project-find-file)
 (define-key spacemacs-leader-map (kbd "p b") 'project-switch-to-buffer)
@@ -1802,8 +1814,8 @@ need one `q' per buffer before the transient exits."
 ;; Zero-dep: built-in project.el + xref + grep + fido-vertical (§8) only.
 ;; SPC s s lists buffer lines via completing-read (fido-vertical shows
 ;; all on empty input, flex filters as you type); s f / s g / s d below.
-(require 'xref)
-(require 'grep)
+;; No `require' xref/grep: commands autoload; `xref-search-program'
+;; setq is safe pre-load (defcustom keeps pre-set value).
 
 ;; Use rg as xref backend when present; else stay on grep.
 (when (executable-find "rg")
@@ -1828,6 +1840,26 @@ Fallback path uses built-in grep / project-find-file."
       (project-root proj)
     default-directory))
 
+(defvar nano/rg-files-cache nil
+  "Alist (ROOT . (MTIME . FILES)) caching `rg --files' per project root.")
+
+(defun nano/rg-files-cached (root)
+  "Return `rg --files' list under ROOT, reusing cache when dir mtime same."
+  (let* ((default-directory (file-name-as-directory root))
+         (mtime (ignore-errors
+                  (file-attribute-modification-time
+                   (file-attributes default-directory))))
+         (hit (assoc root nano/rg-files-cache)))
+    (if (and hit (equal (cadr hit) mtime))
+        (cddr hit)
+      (let ((files (ignore-errors
+                     (process-lines "rg" "--files" "--hidden"
+                                    "--glob" "!.git/*"))))
+        (setq nano/rg-files-cache
+              (cons (cons root (cons mtime files))
+                    (assoc-delete-all root nano/rg-files-cache)))
+        files))))
+
 (defun nano/rg-find-file ()
   "Find file by name with `rg --files'.  Bound to SPC s f.
 Completing-read feeds fido-vertical (§8).  Falls back to
@@ -1836,10 +1868,7 @@ Completing-read feeds fido-vertical (§8).  Falls back to
   (let ((root (nano/search-root)))
     (if (and (nano/search-ensure-rg)
              (not (file-remote-p root)))
-        (let* ((default-directory (file-name-as-directory root))
-               (files (ignore-errors
-                        (process-lines "rg" "--files" "--hidden"
-                                       "--glob" "!.git/*"))))
+        (let ((files (nano/rg-files-cached root)))
           (if (not files)
               (user-error "SPC s f: no files found in %s" root)
             (find-file
@@ -1939,15 +1968,19 @@ Skips empty lines, truncates long lines for display."
 ;; External edits (git pull, rg replace, other editor) auto-reflect.
 ;; Zero-dep: built-in autorevert.el only.  Unsaved buffers never
 ;; clobbered — auto-revert skips modified buffers.  SPC b R stays
-;; as manual `revert-buffer' fallback (§5b).
-(require 'autorevert)
+;; as manual `revert-buffer' fallback (§5b).  No `require': the mode
+;; call autoloads autorevert.el, then setqs apply.
 (global-auto-revert-mode 1)
 (setq global-auto-revert-non-file-buffers t ; dired too
       auto-revert-verbose nil               ; quiet
       auto-revert-remote-files nil          ; skip TRAMP, perf
       auto-revert-use-notify t              ; inotify, no poll
-      auto-revert-check-vc-info nil)        ; perf, magit handles vc
+      auto-revert-check-vc-info nil         ; perf, magit handles vc
+      auto-revert-interval 5)               ; poll fallback only, notify is primary
 (add-to-list 'global-auto-revert-ignore-modes 'Buffer-menu-mode)
+(add-to-list 'global-auto-revert-ignore-modes 'elfeed-search-mode)
+(add-to-list 'global-auto-revert-ignore-modes 'elfeed-show-mode)
+(add-to-list 'global-auto-revert-ignore-modes 'magit-status-mode)
 
 
 ;; ---------------------------------------------------------------------
@@ -2767,11 +2800,25 @@ Example: `- foo' -> `- [ ] foo'; empty line -> `- [ ] '."
 ;;      Deliberately NOT evil-collection-org-agenda: it binds SPC to
 ;;      `org-agenda-show', stealing SPC=leader (user choice).  Spacemacs
 ;;      parity keys below re-bound explicitly in motion instead.
-(defun nano/org-agenda-refresh-files ()
+(defvar nano/org-dir-mtime nil
+  "Cached mtime of `nano/org-directory' for agenda refresh skip.")
+(defvar nano/org-dir-files nil
+  "Cached top-level agenda file list matching `nano/org-dir-mtime'.")
+
+(defun nano/org-agenda-refresh-files (&optional force)
   "Set `org-agenda-files' to top-level *.org under `nano/org-directory'.
-No-op (warn once via `nano/org-ensure-directory') when dir missing."
+Skips the directory rescan when dir mtime is unchanged (same set of
+files); pass FORCE to rescan unconditionally.  No-op (warn once via
+`nano/org-ensure-directory') when dir missing."
   (when (nano/org-ensure-directory)
-    (setq org-agenda-files (nano/org-agenda-top-level-files))))
+    (let ((mtime (ignore-errors
+                   (file-attribute-modification-time
+                    (file-attributes nano/org-directory)))))
+      (when (or force (null nano/org-dir-files)
+                (not (equal mtime nano/org-dir-mtime)))
+        (setq nano/org-dir-files (nano/org-agenda-top-level-files)
+              nano/org-dir-mtime mtime))
+      (setq org-agenda-files nano/org-dir-files))))
 
 (with-eval-after-load 'org-agenda
   (setq org-agenda-span 7
@@ -2874,7 +2921,7 @@ No-op (warn once via `nano/org-ensure-directory') when dir missing."
 ;;      global 0 (org standard).  Zero-dep: appt + notifications built-in.
 ;;      Refresh each minute (top-level files only, cheap) + agenda/save/todo
 ;;      hooks.  D-Bus fail / tty / batch falls back to echo + mode-line.
-(require 'appt)
+;;      No `require' appt: `appt-activate' autoloads; setqs pre-load safe.
 (setq appt-message-warning-time 0 ; on-time, not 10-early
       appt-display-interval 1     ; minute precision
       appt-audible nil
@@ -2896,23 +2943,38 @@ MIN-TO-APP ignored (warning 0).  D-Bus fail falls back to echo."
 (setq appt-disp-window-function #'nano/appt-desktop-notify
       appt-delete-window-function #'ignore)
 
-(defun nano/org-appt-refresh ()
-  "Rebuild appt list from SCHEDULED items with time.  Silent no-op when org dir missing."
+(defvar nano/org-appt-last-mtime nil
+  "Dir mtime at last successful appt rebuild; timer skips when same.")
+
+(defun nano/org-appt-refresh (&optional force)
+  "Rebuild appt list from SCHEDULED items with time.
+Silent no-op when org dir missing.  With FORCE, rebuild
+unconditionally; the minute timer passes none and skips the parse
+when dir mtime is unchanged (saves/todo/agenda hooks force)."
   (when (nano/org-ensure-directory)
-    (nano/org-agenda-refresh-files)
-    (when (or (featurep 'org-agenda) (require 'org-agenda nil t))
-      (let ((inhibit-message t))
-        (ignore-errors (org-agenda-to-appt t nil :scheduled*))))))
+    (let ((mtime (ignore-errors
+                   (file-attribute-modification-time
+                    (file-attributes nano/org-directory)))))
+      (when (or force (not (equal mtime nano/org-appt-last-mtime)))
+        (nano/org-agenda-refresh-files force)
+        (when (or (featurep 'org-agenda) (require 'org-agenda nil t))
+          (let ((inhibit-message t))
+            (ignore-errors (org-agenda-to-appt t nil :scheduled*)))
+          (setq nano/org-appt-last-mtime mtime))))))
+
+(defun nano/org-appt-refresh-force (&rest _)
+  "Hook wrapper: forced appt rebuild (save/todo/agenda events)."
+  (nano/org-appt-refresh t))
 
 (unless noninteractive
   (appt-activate 1)
   (run-at-time nil 60 #'nano/org-appt-refresh)
-  (add-hook 'window-setup-hook #'nano/org-appt-refresh)
-  (add-hook 'org-agenda-finalize-hook #'nano/org-appt-refresh)
-  (add-hook 'org-after-todo-state-change-hook #'nano/org-appt-refresh)
+  (add-hook 'window-setup-hook #'nano/org-appt-refresh-force)
+  (add-hook 'org-agenda-finalize-hook #'nano/org-appt-refresh-force)
+  (add-hook 'org-after-todo-state-change-hook #'nano/org-appt-refresh-force)
   (add-hook 'org-mode-hook
             (lambda ()
-              (add-hook 'after-save-hook #'nano/org-appt-refresh nil t))))
+              (add-hook 'after-save-hook #'nano/org-appt-refresh-force nil t))))
 
 ;; 18f. Bullets — zero-dep Spacemacs parity (no org-superstar fetch).
 ;;      File keeps `*'; display composes leading stars per heading:
@@ -3474,6 +3536,16 @@ gr/gR (refresh), show q (quit) for nano keys."
 (defvar nano/elfeed-sort-mode 'date
   "Active elfeed-search sort mode: `date' (oldest first) or `random'.")
 
+(defvar nano/elfeed-random-ranks (make-hash-table :test 'eq)
+  "Memoized random ranks per entry for elfeed random sort mode.")
+
+(defun nano/elfeed-random-rank (entry)
+  "Return stable random rank for ENTRY, assigning once per shuffle."
+  (or (gethash entry nano/elfeed-random-ranks)
+      (let ((r (random most-positive-fixnum)))
+        (puthash entry r nano/elfeed-random-ranks)
+        r)))
+
 (defun nano/elfeed-apply-sort-mode ()
   "Apply `nano/elfeed-sort-mode' to current elfeed-search buffer."
   (pcase nano/elfeed-sort-mode
@@ -3481,9 +3553,12 @@ gr/gR (refresh), show q (quit) for nano keys."
      (setq-local elfeed-search-sort-order 'ascending)
      (setq-local elfeed-search-sort-function nil))
     ('random
+     (clrhash nano/elfeed-random-ranks) ; fresh shuffle each apply
      (setq-local elfeed-search-sort-order 'ascending)
      (setq-local elfeed-search-sort-function
-                 (lambda (_a _b) (eq (random 2) 0)))))
+                 (lambda (a b)
+                   (< (nano/elfeed-random-rank a)
+                      (nano/elfeed-random-rank b))))))
   (elfeed-search-update :force)
   (force-mode-line-update t))
 
@@ -3663,11 +3738,13 @@ Idempotent: skips when `elfeed-protocol-fetcher' already hooked."
     "Return ttrss article ids of existing local elfeed entries.
 HOST-URL is the ttrss host."
     (let* ((proto-id (elfeed-protocol-ttrss-id host-url))
+           (seen (make-hash-table :test 'equal))
            (ids nil))
       (elfeed-db-visit (entry)
         (when (equal (elfeed-protocol-entry-protocol-id entry) proto-id)
           (let ((id (elfeed-meta entry :id)))
-            (when (and id (not (member id ids)))
+            (when (and id (not (gethash id seen)))
+              (puthash id t seen)
               (push id ids)))))
       (nreverse ids)))
 
@@ -4021,8 +4098,13 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 ;; Python exception: 4 spaces, guesser off (else it overrides per file).
 (setq python-indent-offset 4
       python-indent-guess-indent-offset nil)
-(add-hook 'python-mode-hook (lambda () (setq-local tab-width 4)))
-(add-hook 'python-ts-mode-hook (lambda () (setq-local tab-width 4)))
+(defun nano/python-set-tab-width ()
+  "Use 4-space tabs in Python buffers.  Named for reload safety."
+  (setq-local tab-width 4))
+(remove-hook 'python-mode-hook #'nano/python-set-tab-width)
+(remove-hook 'python-ts-mode-hook #'nano/python-set-tab-width)
+(add-hook 'python-mode-hook #'nano/python-set-tab-width)
+(add-hook 'python-ts-mode-hook #'nano/python-set-tab-width)
 
 ;;; init.el ends here
 (custom-set-variables
