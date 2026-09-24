@@ -19,7 +19,7 @@
 ;;   §7  Theme toggle + persistence + spacemacs-light/nord-dark faces  (SPC t n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
 ;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
-;;   §10 Git  (magit + delta, SPC g)
+;;   §10 Git  (magit + delta + blame transient, SPC g)
 ;;   §11 Project  (built-in project.el, SPC p)
 ;;   §12 Search  (ripgrep via built-in project+xref, SPC s)
 ;;   §13 File sync  (built-in auto-revert, SPC b R fallback)
@@ -37,6 +37,7 @@
 ;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
 ;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
 ;;   §27  OpenCode  (codeberg/sczi, SPC a c, lazy)
+;;   §28  Indentation  (global 2 spaces, Python 4)
 ;; =====================================================================
 
 
@@ -290,7 +291,9 @@ Confirms unless prefix ARG.  Errors when buffer visits no file."
 
 (defun nano/rename-current-buffer-file (&optional arg)
   "Rename file visited by current buffer.  Bound to SPC f R.
-Without prefix ARG, prompt starts in current dir; with ARG, full old path.
+No prefix: edit file name in place (e.g. `exocortex1.org' ->
+`exocortex.org'); RET takes input literally.
+With prefix ARG, pick full new path with file completion.
 Creates parent dirs after confirm.  Errors when buffer visits no file."
   (interactive "P")
   (let ((old (buffer-file-name)))
@@ -298,10 +301,21 @@ Creates parent dirs after confirm.  Errors when buffer visits no file."
       (user-error "Buffer %s visits no file" (buffer-name)))
     (let* ((old-dir (file-name-directory old))
            (old-short (file-name-nondirectory old))
-           (path (read-file-name "New name: " (if arg old old-dir)))
-           (new (if (string= (file-name-nondirectory path) "")
-                    (concat path old-short)
-                  path)))
+           ;; `read-string', not `read-file-name': fido RET
+           ;; force-completes to the first partial match, so typing
+           ;; `exocortex.org' next to `exocortex1.org' would snap back
+           ;; to the old file.  No completion here; literal input wins.
+           ;; Relative input (sub/dir, ../x) expands under old-dir.
+           (new (if arg
+                    (let ((path (read-file-name "Move to: " old-dir)))
+                      (if (string= (file-name-nondirectory path) "")
+                          (concat path old-short)
+                        path))
+                  (let ((input (read-string (format "Rename %s to: " old-short)
+                                            old-short)))
+                    (when (string-empty-p input)
+                      (user-error "Canceled: rename"))
+                    (expand-file-name input old-dir)))))
       (when (get-buffer new)
         (user-error "A buffer named '%s' already exists" new))
       (when (string-equal new old)
@@ -322,7 +336,9 @@ Creates parent dirs after confirm.  Errors when buffer visits no file."
 
 (defun nano/copy-current-buffer-file (&optional arg)
   "Copy file visited by current buffer to new path.  Bound to SPC f c.
-Without prefix ARG, prompt starts in current dir; with ARG, full old path.
+No prefix: edit copy name in place (e.g. `exocortex1.org' ->
+`exocortex-backup.org'); RET takes input literally.
+With prefix ARG, pick full destination with file completion.
 Creates parent dirs after confirm.  Buffer keeps visiting old file.
 Overwrites after confirm.  Errors when buffer visits no file."
   (interactive "P")
@@ -331,11 +347,20 @@ Overwrites after confirm.  Errors when buffer visits no file."
       (user-error "Buffer %s visits no file" (buffer-name)))
     (let* ((old-dir (file-name-directory old))
            (old-short (file-name-nondirectory old))
-           (path (read-file-name "Copy to: " (if arg old old-dir)))
+           ;; Same fido dodge as rename above: `read-string' keeps
+           ;; RET literal; `read-file-name' would force-complete to a
+           ;; partial-matching sibling.
            (new (expand-file-name
-                 (if (string= (file-name-nondirectory path) "")
-                     (concat path old-short)
-                   path))))
+                 (if arg
+                     (let ((path (read-file-name "Move copy to: " old-dir)))
+                       (if (string= (file-name-nondirectory path) "")
+                           (concat path old-short)
+                         path))
+                   (let ((input (read-string (format "Copy %s to: " old-short)
+                                             old-short)))
+                     (when (string-empty-p input)
+                       (user-error "Canceled: copy"))
+                     input)))))
       (when (string-equal new (expand-file-name old))
         (user-error "Same new and old name"))
       (let ((new-dir (file-name-directory new)))
@@ -1628,6 +1653,119 @@ normal).  One retry on failure, then warn."
   "SPC g f d" "diff"
   "SPC g f m" "file dispatch")
 
+;; 10b. Blame  (SPC g b transient, SPC g B popup)
+;; Spacemacs `SPC g b' parity, zero-dep repeat via `set-transient-map'
+;; (§14 zoom pattern, no hydra/transient-state dep).  Entry starts
+;; `magit-blame-addition' when not already blaming, then arms the
+;; repeat map so p/n/b/r/... work without re-pressing SPC.
+;; All magit-blame-* are straight autoloads — no `require' here,
+;; zero startup cost.  Stock blame keys also work directly in the
+;; buffer (`magit-blame-read-only-mode-map': p/P/n/N/b/r/f/B/c/q).
+;; SPC left stock (scroll-up) in blame buffers; leader fallback C-SPC (§4).
+(defvar nano/git-blame-full-hint-toggle nil
+  "Non-nil shows full blame hint; `?' toggles.")
+
+(defun nano/git-blame--hint ()
+  "Minified or full hint for the blame repeat transient."
+  (if nano/git-blame-full-hint-toggle
+      "blame [?] help | p/P prev/same  n/N next/same  RET show | b add  r remove  f last-with  e echo  q quit | c style  Y hash  B popup  Q exit"
+    "blame chunks: n/N/p/P/RET commits: b/r/f/e/q [?] help"))
+
+(defun nano/git-blame-transient-activate ()
+  "Re-arm blame repeat map with hint in echo area."
+  (set-transient-map nano/git-blame-repeat-map t)
+  (message "%s" (nano/git-blame--hint)))
+
+(defun nano/git-blame-transient ()
+  "Start blaming current file, then repeat (`SPC g b').
+On-enter mirrors Spacemacs: no-op when already blaming."
+  (interactive)
+  (unless (bound-and-true-p magit-blame-mode)
+    (call-interactively #'magit-blame-addition))
+  (nano/git-blame-transient-activate))
+
+(defmacro nano/git-blame--wrap (name target)
+  "Define NAME wrapper calling TARGET then re-arming blame transient."
+  `(defun ,name ()
+     ,(format "Call `%s', then repeat." target)
+     (interactive)
+     (call-interactively #',target)
+     (nano/git-blame-transient-activate)))
+
+(nano/git-blame--wrap nano/git-blame-prev magit-blame-previous-chunk)
+(nano/git-blame--wrap nano/git-blame-prev-same magit-blame-previous-chunk-same-commit)
+(nano/git-blame--wrap nano/git-blame-next magit-blame-next-chunk)
+(nano/git-blame--wrap nano/git-blame-next-same magit-blame-next-chunk-same-commit)
+(nano/git-blame--wrap nano/git-blame-add magit-blame-addition)
+(nano/git-blame--wrap nano/git-blame-rm magit-blame-removal)
+(nano/git-blame--wrap nano/git-blame-final magit-blame-reverse)
+(nano/git-blame--wrap nano/git-blame-echo-cmd magit-blame-echo)
+(nano/git-blame--wrap nano/git-blame-cycle magit-blame-cycle-style)
+(nano/git-blame--wrap nano/git-blame-hash magit-blame-copy-hash)
+(nano/git-blame--wrap nano/git-blame-show magit-show-commit)
+
+(defun nano/git-blame-quit-or-exit ()
+  "Quit blaming, staying in transient while blame is active (`q').
+Mirrors Spacemacs `:exit (not magit-blame-mode)': recursive blames
+need one `q' per buffer before the transient exits."
+  (interactive)
+  (when (bound-and-true-p magit-blame-mode)
+    (call-interactively #'magit-blame-quit))
+  (if (bound-and-true-p magit-blame-mode)
+      (nano/git-blame-transient-activate)
+    (message "blame quit")))
+
+(defun nano/git-blame-quit-transient ()
+  "Exit blame transient, leaving blame overlays on (`Q')."
+  (interactive)
+  (message "blame transient quit"))
+
+(defun nano/git-blame-popup-exit ()
+  "Open stock `magit-blame' popup, exiting transient (`B')."
+  (interactive)
+  (call-interactively #'magit-blame))
+
+(defun nano/git-blame-toggle-hint ()
+  "Toggle full/minified blame hint (`?')."
+  (interactive)
+  (setq nano/git-blame-full-hint-toggle
+        (not nano/git-blame-full-hint-toggle))
+  (nano/git-blame-transient-activate))
+
+(defvar nano/git-blame-repeat-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "p") 'nano/git-blame-prev)
+    (define-key m (kbd "P") 'nano/git-blame-prev-same)
+    (define-key m (kbd "n") 'nano/git-blame-next)
+    (define-key m (kbd "N") 'nano/git-blame-next-same)
+    (define-key m (kbd "RET") 'nano/git-blame-show)
+    (define-key m (kbd "b") 'nano/git-blame-add)
+    (define-key m (kbd "r") 'nano/git-blame-rm)
+    (define-key m (kbd "f") 'nano/git-blame-final)
+    (define-key m (kbd "e") 'nano/git-blame-echo-cmd)
+    (define-key m (kbd "q") 'nano/git-blame-quit-or-exit)
+    (define-key m (kbd "c") 'nano/git-blame-cycle)
+    (define-key m (kbd "Y") 'nano/git-blame-hash)
+    (define-key m (kbd "B") 'nano/git-blame-popup-exit)
+    (define-key m (kbd "Q") 'nano/git-blame-quit-transient)
+    (define-key m (kbd "?") 'nano/git-blame-toggle-hint)
+    m)
+  "Repeat keys active after one `SPC g b'.")
+
+(define-key spacemacs-leader-map (kbd "g b") 'nano/git-blame-transient)
+(define-key spacemacs-leader-map (kbd "g B") 'magit-blame)
+(which-key-add-key-based-replacements
+  "SPC g b" "blame transient"
+  "SPC g B" "blame popup")
+
+;; RET shows commit at point in blame buffers (Spacemacs parity).
+;; Stock map binds `C-m' only; GUI `<return>' needs explicit RET.
+(with-eval-after-load 'magit-blame
+  (with-eval-after-load 'evil
+    (when (boundp 'magit-blame-read-only-mode-map)
+      (evil-define-key 'normal magit-blame-read-only-mode-map
+        (kbd "RET") 'magit-show-commit))))
+
 
 ;; ---------------------------------------------------------------------
 ;; §11  Project  (built-in project.el, SPC p)
@@ -2086,8 +2224,8 @@ Mimics `spacemacs/set-leader-keys-for-major-mode' without bind-map."
 ;; + babel execute (inline src_lang{} + #+BEGIN_SRC).
 ;; Mirrors layers/+emacs/org/packages.el:346-360, trimmed to
 ;; execute/navigate subset (no tangle/sessions/lob).
-;; NOTE: more org bindings appended later — §18c (todo/text/random),
-;; §21b (roam).  Edit those too for full `,' map.
+;; NOTE: more org bindings appended later — §18c (text/random),
+;; §18c2 (tables), §21b (roam).  Edit those too for full `,' map.
 (nano/declare-major-prefix 'org-mode "d" "dates")
 (nano/declare-major-prefix 'org-mode "s" "subtree")
 (nano/declare-major-prefix 'org-mode "i" "insert")
@@ -2527,9 +2665,9 @@ Example: `- foo' -> `- [ ] foo'; empty line -> `- [ ] '."
     (evil-insert-state 1)))
 (nano/declare-major-prefix 'org-mode "x" "text")
 (nano/set-leader-keys-for-major-mode 'org-mode
-                                      "t" 'org-todo           ; cycle TODO->NEXT->DONE
                                       "R" 'nano/org-random-current-buffer ; random headline, current buffer only
                                       "ic" 'nano/org-insert-checkbox-item ; unchecked `- [ ]' DWIM
+                                      "ih" 'org-insert-heading ; same-level heading
                                       "xb" 'nano/org-bold
                                      "xc" 'nano/org-code
                                      "xi" 'nano/org-italic
@@ -2540,11 +2678,67 @@ Example: `- foo' -> `- [ ] foo'; empty line -> `- [ ] '."
                                      "xv" 'nano/org-verbatim)
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'org-mode)
-  "t" "todo cycle" "R" "random note (buffer)"
-  "ic" "insert checkbox"
+  "R" "random note (buffer)"
+  "ic" "insert checkbox" "ih" "insert heading"
   "xb" "bold" "xc" "code" "xi" "italic" "xo" "open link"
   "xr" "clear emphasis" "xs" "strike-through"
   "xu" "underline" "xv" "verbatim")
+
+;; 18c2. Tables — Spacemacs `, t' parity (layers/+emacs/org/packages.el:316-343).
+;;      Built-in org-table autoloads only, zero startup cost, zero dep.
+;;      Replaces old `, t' todo cycle (unused; todo via `C-c C-t' /
+;;      `S-<left/right>' / agenda `, t').  Example: `, tn' creates table,
+;;      `, ta' realigns, `, tr' recalculates formulas.
+(nano/declare-major-prefix 'org-mode "t" "tables")
+(nano/declare-major-prefix 'org-mode "td" "delete")
+(nano/declare-major-prefix 'org-mode "ti" "insert")
+(nano/declare-major-prefix 'org-mode "tt" "toggle")
+(nano/set-leader-keys-for-major-mode 'org-mode
+                                      "ta" 'org-table-align
+                                      "tb" 'org-table-blank-field
+                                      "tc" 'org-table-convert
+                                      "tdc" 'org-table-delete-column
+                                      "tdr" 'org-table-kill-row
+                                      "te" 'org-table-eval-formula
+                                      "tE" 'org-table-export
+                                      "tf" 'org-table-field-info
+                                      "th" 'org-table-previous-field
+                                      "tH" 'org-table-move-column-left
+                                      "tic" 'org-table-insert-column
+                                      "tih" 'org-table-insert-hline
+                                      "tiH" 'org-table-hline-and-move
+                                      "tir" 'org-table-insert-row
+                                      "tI" 'org-table-import
+                                      "tj" 'org-table-next-row
+                                      "tJ" 'org-table-move-row-down
+                                      "tK" 'org-table-move-row-up
+                                      "tl" 'org-table-next-field
+                                      "tL" 'org-table-move-column-right
+                                      "tn" 'org-table-create
+                                      "tN" 'org-table-create-with-table.el
+                                      "tr" 'org-table-recalculate
+                                      "tR" 'org-table-recalculate-buffer-tables
+                                      "ts" 'org-table-sort-lines
+                                      "ttf" 'org-table-toggle-formula-debugger
+                                      "tto" 'org-table-toggle-coordinate-overlays
+                                      "tw" 'org-table-wrap-region)
+(which-key-add-keymap-based-replacements
+  (nano/major-mode-leader-map 'org-mode)
+  "ta" "align" "tb" "blank field" "tc" "convert"
+  "tdc" "delete column" "tdr" "kill row"
+  "te" "eval formula" "tE" "export" "tf" "field info"
+  "th" "previous field" "tH" "move column left"
+  "tic" "insert column" "tih" "insert hline"
+  "tiH" "hline and move" "tir" "insert row"
+  "tI" "import" "tj" "next row"
+  "tJ" "move row down" "tK" "move row up"
+  "tl" "next field" "tL" "move column right"
+  "tn" "create" "tN" "create with table.el"
+  "tr" "recalculate" "tR" "recalculate all"
+  "ts" "sort lines"
+  "ttf" "toggle formula debugger"
+  "tto" "toggle coordinate overlays"
+  "tw" "wrap region")
 
 ;; 18d. Random note — tasshin/org-randomnote (lazy, zero startup cost).
 ;;      Deps: dash + f (+ s via f), all lazy via straight autoloads.
@@ -3532,6 +3726,21 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 
 (add-hook 'elfeed-update-hooks #'nano/elfeed-ttrss-sync-read-state-hook)
 
+;; 23d. Late-arriving ttrss entries redraw search (single `g r').
+;;      `elfeed-protocol-fetcher' (elfeed-protocol.el) calls its `cb'
+;;      synchronously, so `elfeed--update-feed' runs `elfeed-update-hook'
+;;      BEFORE the async ttrss HTTP chain (`fetch-prepare -> login ->
+;;      feed-list -> do-update -> parse-entries -> elfeed-db-add')
+;;      lands.  The debounced redraw then shows the stale DB, and only
+;;      the next `g r' (via `elfeed-update-init-hook' force) reveals the
+;;      new posts.  The §23c state-sync batch (getArticle after update)
+;;      never fires any update hook either.  Fix: redraw on every DB
+;;      commit instead — covers main fetch + sync batch.  Debounce
+;;      (1s `elfeed-search-update-delay') coalesces multi-batch adds;
+;;      nil-safe when *elfeed-search* absent.
+(with-eval-after-load 'elfeed-search
+  (add-hook 'elfeed-db-update-hook #'elfeed-search--update-debounce))
+
 ;; ---------------------------------------------------------------------
 ;; §24  Select  (expand-region, SPC v, lazy)
 ;; ---------------------------------------------------------------------
@@ -3778,6 +3987,42 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 (add-hook 'opencode-session-mode-hook #'nano/opencode-setup-major-leader)
 (add-hook 'opencode-session-control-mode-hook
           #'nano/opencode-control-setup-major-leader)
+
+;; ---------------------------------------------------------------------
+;; §28  Indentation  (global 2 spaces, Python 4)
+;; ---------------------------------------------------------------------
+;; Spaces everywhere (no TAB chars).  `setq-default' so file-local /
+;; mode-local values still win.  Per-mode offsets mirror global 2;
+;; Python alone uses 4.  All lazy/guarded: no `require', zero startup
+;; cost.  Reload-safe via `SPC f e r'.
+(setq-default indent-tabs-mode nil
+              tab-width 2
+              standard-indent 2)
+
+;; JS / CSS / HTML built-ins (vars autoloaded with their modes).
+(setq js-indent-level 2
+      js-switch-indent-offset 2
+      css-indent-offset 2
+      sgml-basic-offset 2)
+
+(with-eval-after-load 'nxml-mode
+  (setq nxml-child-indent 2
+        nxml-attribute-indent 2))
+
+;; JSON: built-in js-json shares `js-indent-level' above; tree-sitter
+;; and external `json-mode' guarded so no error when absent.
+(with-eval-after-load 'json-ts-mode
+  (when (boundp 'json-ts-mode-indent-offset)
+    (setq json-ts-mode-indent-offset 2)))
+(with-eval-after-load 'json-mode
+  (when (boundp 'json-mode-indent-level)
+    (setq json-mode-indent-level 2)))
+
+;; Python exception: 4 spaces, guesser off (else it overrides per file).
+(setq python-indent-offset 4
+      python-indent-guess-indent-offset nil)
+(add-hook 'python-mode-hook (lambda () (setq-local tab-width 4)))
+(add-hook 'python-ts-mode-hook (lambda () (setq-local tab-width 4)))
 
 ;;; init.el ends here
 (custom-set-variables
