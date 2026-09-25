@@ -681,19 +681,33 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
   "Selected-window highlight for modeline blocks."
   :group 'nano)
 
-(defun nano/apply-modeline-active-face ()
-  "Paint `nano-face-header-active' per theme.  Re-applied after refresh."
+(defun nano/apply-modeline-faces ()
+  "Paint custom modeline block faces per theme.  Re-applied after refresh.
+Covers `nano-face-header-active' plus soft-calm `nano-face-header-critical'
+(insert ` I ', replace ` R ', modified ` ** '): stock critical is solid neon
+red under the §7c remap (light: Spacemacs `err' #e0211d) — alarms, not state
+tags.  Spacemacs designs state tags as medium-chroma solid blocks
+(chartreuse3 insert, chocolate replace, firebrick1 iedit-insert); follow that:
+firebrick brick-red light, nord11 muted red dark."
   (if (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
+      (progn
+        (set-face-attribute 'nano-face-header-active nil
+                            :foreground "#655370" :background "#d3d3e7"
+                            :box `(:line-width 1 :color ,nano-color-background :style nil))
+        (set-face-attribute 'nano-face-header-critical nil
+                            :foreground "#fbf8ef" :background "#B22222"
+                            :box `(:line-width 1 :color ,nano-color-background :style nil)))
+    (progn
       (set-face-attribute 'nano-face-header-active nil
-                          :foreground "#655370" :background "#d3d3e7"
+                          :foreground "#2E3440" :background "#A3BE8C"
                           :box `(:line-width 1 :color ,nano-color-background :style nil))
-    (set-face-attribute 'nano-face-header-active nil
-                        :foreground "#2E3440" :background "#A3BE8C"
-                        :box `(:line-width 1 :color ,nano-color-background :style nil))))
+      (set-face-attribute 'nano-face-header-critical nil
+                          :foreground "#2E3440" :background "#BF616A"
+                          :box `(:line-width 1 :color ,nano-color-background :style nil)))))
 
-(nano/apply-modeline-active-face)
+(nano/apply-modeline-faces)
 (when (fboundp 'nano-refresh-theme)
-  (advice-add 'nano-refresh-theme :after #'nano/apply-modeline-active-face))
+  (advice-add 'nano-refresh-theme :after #'nano/apply-modeline-faces))
 
 (defun nano/modeline-selected-p ()
   "Non-nil when rendered modeline belongs to selected window."
@@ -1107,15 +1121,33 @@ Skips minibuffer and single-window frames (nothing to equalize)."
 
 (nano/theme-restore)
 
-;; 7b. Trailing whitespace — true red in file buffers, Spacemacs red parity.
+;; 7b. Trailing whitespace — true red in code/text buffers, Spacemacs parity.
 ;;     Mechanism is NOT theme-only: `show-trailing-whitespace' enables the
 ;;     highlight, `trailing-whitespace' face colors it.  Nano maps that face
 ;;     to `nano-face-subtle' (nano-theme.el:124), so override to true red here.
 ;;     `nano-refresh-theme' re-applies nano faces, so re-assert via advice.
-;;     Exempt: read-only + special-mode buffers (eww derives from
-;;     special-mode, plus help/magit/...) never highlight — their trailing
-;;     spaces are renderer output, not user dirt.
-(setq-default show-trailing-whitespace t)
+;;     Spacemacs opt-in model (spacemacs-defaults/packages.el:494-495,
+;;     funcs.el:178): global default stays nil, highlight enabled ONLY via
+;;     `prog-mode-hook' + `text-mode-hook' (covers org/markdown derivatives).
+;;     fundamental/dired/special/help/magit/minibuffer never highlight.
+;;     Exempt within scope: read-only + special-mode buffers (eww derives from
+;;     special-mode, plus help/magit/...) — mode hooks run before
+;;     `after-change-major-mode-hook', so the inhibit below still wins there.
+(setq-default show-trailing-whitespace nil)
+
+(defvar nano/trailing-whitespace-enabled t
+  "Non-nil enables trailing-whitespace highlight in prog/text buffers.
+Mirrors `dotspacemacs-show-trailing-whitespace'.  Flipped by
+`nano/toggle-trailing-whitespace' (SPC t w); the global default of
+`show-trailing-whitespace' stays nil so other modes never inherit it.")
+
+(defun nano/enable-trailing-whitespace ()
+  "Enable trailing-whitespace highlight in prog/text buffers (Spacemacs parity)."
+  (when nano/trailing-whitespace-enabled
+    (setq show-trailing-whitespace t)))
+
+(add-hook 'prog-mode-hook #'nano/enable-trailing-whitespace)
+(add-hook 'text-mode-hook #'nano/enable-trailing-whitespace)
 
 (defun nano/apply-trailing-whitespace-face ()
   "Paint `trailing-whitespace' true red.  Re-applied after theme refresh."
@@ -1332,15 +1364,20 @@ Installed :after `nano-refresh-theme'.  No-op when light."
 ;; No boot-time buffer loop: hooks cover new buffers; saves O(buffers) startup.
 
 (defun nano/toggle-trailing-whitespace ()
-  "Toggle trailing-whitespace highlight in editable buffers.  Bound to SPC t w.
-Exempt buffers (read-only / special-mode) stay off when enabling."
+  "Toggle trailing-whitespace highlight in prog/text buffers.  Bound to SPC t w.
+Flips `nano/trailing-whitespace-enabled'; other modes stay off when enabling.
+Exempt buffers (read-only / special-mode) stay off when enabling.
+The global default of `show-trailing-whitespace' stays nil so modes
+outside prog/text never inherit the highlight."
   (interactive)
-  (let ((v (not (default-value 'show-trailing-whitespace))))
-    (setq-default show-trailing-whitespace v)
+  (setq nano/trailing-whitespace-enabled (not nano/trailing-whitespace-enabled))
+  (let ((v nano/trailing-whitespace-enabled))
     (dolist (b (buffer-list))
       (with-current-buffer b
         (setq show-trailing-whitespace
-              (and v (not (nano/trailing-whitespace-inhibit-p))))))
+              (and v
+                   (derived-mode-p 'prog-mode 'text-mode)
+                   (not (nano/trailing-whitespace-inhibit-p))))))
     (message "trailing whitespace: %s" (if v "on" "off"))))
 
 (define-key spacemacs-leader-map (kbd "t n") 'nano/toggle-theme)
