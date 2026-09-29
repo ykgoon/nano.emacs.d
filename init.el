@@ -1183,17 +1183,19 @@ Mirrors `dotspacemacs-show-trailing-whitespace'.  Flipped by
 ;;     all-strong org levels).  Never edit straight/repos/ (lost on
 ;;     `straight-pull-all'); all overrides live here.
 (defconst nano/spacemacs-light-palette
-  '((bg1 . "#fbf8ef") (bg2 . "#efeae9") (base . "#655370")
-    (base-dim . "#a094a2") (keyword . "#3a81c3") (func . "#6c3163")
+  '((bg1 . "#fbf8ef") (bg2 . "#efeae9") (base . "#50425c")
+    (base-dim . "#7e7482") (keyword . "#3a81c3") (func . "#6c3163")
     (str . "#2d9574") (type . "#ba2f59") (var . "#715ab1")
     (const . "#4e3163") (comment . "#2aa1ae") (comment-bg . "#ecf3ec")
     (meta . "#da8b55") (war . "#dc752f") (suc . "#42ae2c")
     (err . "#e0211d") (highlight . "#d3d3e7") (strong . "#100a14")
     (head2 . "#2d9574") (head3 . "#67b11d") (head4 . "#b1951d")
     (yellow-bg . "#f6f1e1") (green-bg . "#edf2e9")
-    (cblk . "#655370") (cblk-bg . "#e8e3f0")
+    (cblk . "#50425c") (cblk-bg . "#e8e3f0")
     (cblk-ln . "#9380b2") (cblk-ln-bg . "#ddd8eb"))
-  "Spacemacs-light GUI hexes used by the §7c overrides.")
+  "Spacemacs-light GUI hexes used by the §7c overrides.
+`base'/`base-dim'/`cblk' deliberately darkened one step vs stock
+Spacemacs (#655370/#a094a2) for starker body + faded text.")
 
 ;; 7c2. Nord-dark font-lock/org breakout — dark only.
 ;;      Dark keeps stock nano-dark base (nano-theme-dark.el) untouched:
@@ -1264,8 +1266,8 @@ Guards org/outline faces before their libraries load."
 Installed :after `nano-refresh-theme'.  No-op when dark."
   (when (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
     (let ((g (lambda (k) (cdr (assq k nano/spacemacs-light-palette)))))
-      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg) :slant 'normal :weight 'light)
-      (nano/set-face-maybe 'font-lock-doc-face :foreground (funcall g 'meta))
+      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg) :slant 'normal :weight 'regular)
+      (nano/set-face-maybe 'font-lock-doc-face :foreground (funcall g 'meta) :weight 'regular)
       (nano/set-face-maybe 'font-lock-string-face :foreground (funcall g 'str))
       (nano/set-face-maybe 'font-lock-keyword-face :foreground (funcall g 'keyword) :weight 'bold)
       (nano/set-face-maybe 'font-lock-builtin-face :foreground (funcall g 'keyword) :weight 'bold)
@@ -1277,6 +1279,27 @@ Installed :after `nano-refresh-theme'.  No-op when dark."
       (nano/set-face-maybe 'font-lock-warning-face :foreground (funcall g 'war))
       (nano/set-face-maybe 'link :foreground (funcall g 'keyword) :underline t)
       (nano/apply-spacemacs-light-org-faces))))
+
+;; 7c3. Light text starkness — body + faded/comments slightly starker.
+;;      Vendored `nano-theme--basics' pins `default :weight light' and
+;;      `nano-faces' pins salient/faded `:weight light'; thin with Noto
+;;      Sans Mono.  Bump to `regular' light-only so body + secondary read
+;;      thicker without changing hues.  Dark untouched.
+(defun nano/apply-light-text-starkness (&rest _)
+  "Thicken light-mode body + faded faces.  No-op when dark.
+Installed :after `nano-refresh-theme' (after §7c breakout so vendored
+`light' weights stay overridden).  Safe before org loads."
+  (when (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
+    (nano/set-face-maybe 'default :weight 'regular)
+    (nano/set-face-maybe 'nano-face-default :weight 'regular)
+    (nano/set-face-maybe 'nano-face-salient :weight 'regular)
+    (nano/set-face-maybe 'nano-face-faded :weight 'regular)
+    (nano/set-face-maybe 'font-lock-doc-face :weight 'regular)
+    (nano/set-face-maybe 'org-meta-line :weight 'regular)
+    (nano/set-face-maybe 'org-special-keyword :weight 'regular)
+    (nano/set-face-maybe 'org-drawer :weight 'regular)
+    (nano/set-face-maybe 'org-table :weight 'regular)
+    (nano/set-face-maybe 'org-tag :weight 'regular)))
 
 (defun nano/apply-nord-dark-org-faces ()
   "Apply Nord-dark org/outline faces.  Safe before org loads."
@@ -1333,11 +1356,13 @@ Installed :after `nano-refresh-theme'.  No-op when light."
 
 ;; Re-apply org faces when org loads later (toggle state read live).
 (with-eval-after-load 'org
-  (nano/apply-theme-org-faces))
+  (nano/apply-theme-org-faces)
+  (nano/apply-light-text-starkness))
 
 (when (fboundp 'nano-refresh-theme)
   (advice-add 'nano-refresh-theme :before #'nano/remap-spacemacs-light-colors)
   (advice-add 'nano-refresh-theme :after #'nano/apply-spacemacs-light-faces)
+  (advice-add 'nano-refresh-theme :after #'nano/apply-light-text-starkness)
   (advice-add 'nano-refresh-theme :after #'nano/apply-nord-dark-faces))
 
 ;; `nano/theme-restore' above already refreshed with stock colors;
