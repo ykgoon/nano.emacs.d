@@ -642,7 +642,7 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
 
 
 ;; ---------------------------------------------------------------------
-;; §6  Window management  (winum, header-line, double/triple columns, uniform widths)
+;; §6  Window management  (winum, header-line, double/triple columns, uniform widths, scratch routing)
 ;; ---------------------------------------------------------------------
 
 ;; 6a. Window numbers — winum (deb0ch/emacs-winum)
@@ -1191,6 +1191,155 @@ Skips minibuffer and single-window frames (nothing to equalize)."
 
 (define-key spacemacs-leader-map (kbd "w =") 'nano/balance-window-widths)
 (which-key-add-key-based-replacements "SPC w =" "balance widths")
+
+;; 6f. Scratch-window routing — new buffers display where *scratch* is.
+;;     Extends §18b1 org-link rule to everything: first display of any
+;;     not-yet-visible buffer lands in `*scratch*' window, origin keeps
+;;     its buffer, focus follows.  E.g. `SPC w 2' (scratch left, org
+;;     right) then `SPC f f notes.org' opens notes in scratch pane.
+;;     Two paths (Emacs splits display): `display-buffer' consults
+;;     `display-buffer-alist' (help/magit/agenda), `switch-to-buffer'
+;;     (find-file/SPC b b/org-open) bypasses it — hence alist catch-all
+;;     PLUS `:around' on `switch-to-buffer' sharing one predicate.
+;;     Explicit stays explicit: `switch-to-buffer-other-window',
+;;     `display-buffer-in-direction' (elfeed §23a2, opencode splits),
+;;     dedicated/side windows bypass.  Single window or scratch hidden
+;;     → open in place.  Elfeed search/show untouched both as origin
+;;     and as target buffer.
+(defvar nano/scratch-redirect-in-progress nil
+  "Non-nil while scratch-window routing runs its own display.
+Guards `switch-to-buffer' advice vs `display-buffer' action reentry.")
+
+(defun nano/scratch-target-window ()
+  "Window showing `*scratch*', or selected window as fallback.
+Single window or scratch invisible → current window.  Scoped to
+selected frame; never touches elfeed splits (`elfeed-search/show')."
+  (let ((wins (window-list nil nil)))
+    (cond ((null (cdr wins)) (selected-window))
+          ((get-buffer-window "*scratch*" nil))
+          (t (selected-window)))))
+
+(defun nano/scratch-target-usable-p (target origin)
+  "Non-nil when TARGET can receive an opened buffer.
+Requires live, distinct from ORIGIN, not dedicated/minibuffer."
+  (and target (window-live-p target)
+       (not (eq target origin))
+       (not (window-dedicated-p target))
+       (not (window-minibuffer-p target))))
+
+(defun nano/scratch-buffer-skip-p (buf-or-name)
+  "Non-nil when BUF-OR-NAME must keep default placement.
+Skips ephemeral ` *' UI (which-key/LV/transient/minibuffer),
+` *Completions*', `*Warnings*', `*scratch*' itself.  Accepts live
+buffer or name string (new buffers not yet created)."
+  (let ((name (if (bufferp buf-or-name) (buffer-name buf-or-name)
+                (if (stringp buf-or-name) buf-or-name
+                  (format "%s" buf-or-name)))))
+    (or (null name) (string-empty-p name)
+        (string-prefix-p " " name)
+        (string-prefix-p "*Warnings*" name)
+        (member name '("*Completions*" "*Completion*" "*scratch*")))))
+
+(defun nano/elfeed-buffer-p (buf)
+  "Non-nil when BUF is a live elfeed buffer.
+Checks `elfeed-search/show-mode' or `*elfeed' name prefix."
+  (and (buffer-live-p buf)
+       (with-current-buffer buf
+         (or (derived-mode-p 'elfeed-search-mode 'elfeed-show-mode)
+             (let ((n (buffer-name buf)))
+               (and (stringp n) (string-prefix-p "*elfeed" n)))))))
+
+(defun nano/scratch-elfeed-context-p (buf origin)
+  "Non-nil when scratch routing must stand down for elfeed.
+True when ORIGIN shows an elfeed buffer or BUF is one.  BUF may be
+a live buffer or name; unknown names → nil."
+  (or (and (window-live-p origin)
+           (nano/elfeed-buffer-p (window-buffer origin)))
+      (nano/elfeed-buffer-p
+       (if (bufferp buf) buf (and (stringp buf) (get-buffer buf))))))
+
+(defun nano/move-opened-buffer-to-target (origin target origin-buf shown-before)
+  "Move buffer just opened from ORIGIN into TARGET, then select TARGET.
+ORIGIN-BUF is the buffer before open; SHOWN-BEFORE is an alist
+of (window . buffer) captured pre-open.  Open must run in ORIGIN
+first (keeps context); this only relocates the result.
+Returns t when a new buffer moved, nil when open stayed in place
+\(same-file jump, browser link, error path)."
+  (when (nano/scratch-target-usable-p target origin)
+    (let* ((cur-win (selected-window))
+           (result-win (if (eq cur-win origin) origin cur-win))
+           (result-buf (window-buffer result-win))
+           (result-pt (window-point result-win)))
+      (unless (or (null result-buf) (eq result-buf origin-buf))
+        (when (eq result-win origin)
+          (set-window-buffer origin origin-buf))
+        (when (and (not (eq result-win origin))
+                   (not (eq result-win target)))
+          (let ((prev (cdr (assq result-win shown-before))))
+            (cond ((and prev (buffer-live-p prev))
+                   (set-window-buffer result-win prev))
+                  ((and (not (assq result-win shown-before))
+                        (window-live-p result-win))
+                   (delete-window result-win)))))
+        (set-window-buffer target result-buf)
+        (set-window-point target result-pt)
+        (select-window target)
+        t))))
+
+(defun nano/display-buffer-in-scratch-window (buffer alist)
+  "Display BUFFER in `*scratch*' window for `display-buffer-alist'.
+Catch-all (appended last); returns target window or nil to fall
+through.  Never selects (caller `pop-to-buffer' does); never splits.
+Skips visible buffers, skipped names, elfeed, unusable targets."
+  (ignore alist)
+  (when (and (not nano/scratch-redirect-in-progress)
+             (buffer-live-p buffer)
+             (not (nano/scratch-buffer-skip-p buffer)))
+    (let ((origin (selected-window))
+          (target (nano/scratch-target-window)))
+      (when (and (not (nano/scratch-elfeed-context-p buffer origin))
+                 (nano/scratch-target-usable-p target origin)
+                 (not (get-buffer-window buffer nil)))
+        (let ((nano/scratch-redirect-in-progress t))
+          (set-window-buffer target buffer)
+          target)))))
+
+(defun nano/switch-to-buffer-in-scratch-window (orig buffer-or-name &optional norecord force-same-window)
+  "Route first display of not-yet-visible buffers to scratch window.
+Around `switch-to-buffer' (covers `find-file', `SPC b b', org-open).
+Restores origin buffer, moves point, selects target.  Passthrough
+when redirect in progress, FORCE-SAME-WINDOW, minibuffer, same
+buffer, already visible, skipped name, elfeed, or unusable target."
+  (if (or nano/scratch-redirect-in-progress
+          force-same-window
+          (window-minibuffer-p (selected-window)))
+      (funcall orig buffer-or-name norecord force-same-window)
+    (let* ((buf (if (bufferp buffer-or-name) buffer-or-name
+                  (get-buffer buffer-or-name)))
+           (origin (selected-window))
+           (origin-buf (window-buffer origin)))
+      (cond ((and (buffer-live-p buf) (eq buf origin-buf))
+             (funcall orig buffer-or-name norecord force-same-window))
+            ((and (buffer-live-p buf) (get-buffer-window buf nil))
+             (funcall orig buffer-or-name norecord force-same-window))
+            ((nano/scratch-buffer-skip-p (or buf buffer-or-name))
+             (funcall orig buffer-or-name norecord force-same-window))
+            ((nano/scratch-elfeed-context-p (or buf buffer-or-name) origin)
+             (funcall orig buffer-or-name norecord force-same-window))
+            (t
+             (let ((target (nano/scratch-target-window)))
+               (if (not (nano/scratch-target-usable-p target origin))
+                   (funcall orig buffer-or-name norecord force-same-window)
+                 (let ((shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
+                                             (window-list nil nil)))
+                       result)
+                   (let ((nano/scratch-redirect-in-progress t))
+                     (setq result (funcall orig buffer-or-name norecord force-same-window)))
+                   (nano/move-opened-buffer-to-target origin target origin-buf shown-before)
+                   result))))))))
+
+(advice-add 'switch-to-buffer :around #'nano/switch-to-buffer-in-scratch-window)
+(add-to-list 'display-buffer-alist '("." (nano/display-buffer-in-scratch-window)) t)
 
 
 ;; ---------------------------------------------------------------------
@@ -2618,15 +2767,6 @@ ones are dangling/nonexistent and make `org-agenda-to-appt' prompt
   (let ((ctx (ignore-errors (org-element-context))))
     (and ctx (eq (org-element-type ctx) 'link))))
 
-(defun nano/org-scratch-target-window ()
-  "Window showing `*scratch*', or selected window as fallback.
-Single window or scratch invisible → current window.  Scoped to
-selected frame; never touches elfeed splits (`elfeed-search/show')."
-  (let ((wins (window-list nil nil)))
-    (cond ((<= (length wins) 1) (selected-window))
-          ((get-buffer-window "*scratch*" nil))
-          (t (selected-window)))))
-
 (defun nano/org-link-external-p ()
   "Non-nil when org link at point would open a new buffer.
 `file:' other-file and `id:' → t.  Fuzzy, custom-id, coderef,
@@ -2647,42 +2787,6 @@ so those stay put."
                      t
                    (not (string-equal (file-truename f) (file-truename cur))))))
               (t t))))))
-
-(defun nano/org--scratch-target-usable-p (target origin)
-  "Non-nil when TARGET can receive an opened link buffer.
-Requires live, distinct from ORIGIN, not dedicated/minibuffer."
-  (and target (window-live-p target)
-       (not (eq target origin))
-       (not (window-dedicated-p target))
-       (not (window-minibuffer-p target))))
-
-(defun nano/org--move-opened-buffer-to-target (origin target origin-buf shown-before)
-  "Move buffer just opened from ORIGIN into TARGET, then select TARGET.
-ORIGIN-BUF is the org buffer before open; SHOWN-BEFORE is an alist
-of (window . buffer) captured pre-open.  Open must run in ORIGIN
-first (keeps link context); this only relocates the result.
-Returns t when a new buffer moved, nil when open stayed in place
-\(same-file jump, browser link, error path)."
-  (when (nano/org--scratch-target-usable-p target origin)
-    (let* ((cur-win (selected-window))
-           (result-win (if (eq cur-win origin) origin cur-win))
-           (result-buf (window-buffer result-win))
-           (result-pt (window-point result-win)))
-      (unless (or (null result-buf) (eq result-buf origin-buf))
-        (when (eq result-win origin)
-          (set-window-buffer origin origin-buf))
-        (when (and (not (eq result-win origin))
-                   (not (eq result-win target)))
-          (let ((prev (cdr (assq result-win shown-before))))
-            (cond ((and prev (buffer-live-p prev))
-                   (set-window-buffer result-win prev))
-                  ((and (not (assq result-win shown-before))
-                        (window-live-p result-win))
-                   (delete-window result-win)))))
-        (set-window-buffer target result-buf)
-        (set-window-point target result-pt)
-        (select-window target)
-        t))))
 
 (defun nano/org--open-in-current-window (&optional arg)
   "Follow org link at point in current window.
@@ -2705,15 +2809,18 @@ Focus follows to target."
     (user-error "Not in org-mode"))
   (if (not (ignore-errors (nano/org-link-external-p)))
       (org-open-at-point arg)
-    (let ((target (nano/org-scratch-target-window))
+    (let ((target (nano/scratch-target-window))
           (origin (selected-window)))
-      (if (not (nano/org--scratch-target-usable-p target origin))
+      (if (not (nano/scratch-target-usable-p target origin))
           (nano/org--open-in-current-window arg)
         (let ((origin-buf (window-buffer origin))
               (shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
                                     (window-list nil nil))))
-          (org-open-at-point arg)
-          (nano/org--move-opened-buffer-to-target
+          ;; Guard: §6f `switch-to-buffer' advice would move first;
+          ;; suppress it so this single outer move owns the relocation.
+          (let ((nano/scratch-redirect-in-progress t))
+            (org-open-at-point arg))
+          (nano/move-opened-buffer-to-target
            origin target origin-buf shown-before))))))
 
 (defun nano/org-ret-dwim ()
@@ -2809,18 +2916,20 @@ open-then-move (link context stays in origin); scratch invisible
                   (t (org-meta-return))))
         (if (and org-return-follows-link
                  (ignore-errors (nano/org-link-external-p))
-                 (fboundp 'nano/org--move-opened-buffer-to-target))
+                 (fboundp 'nano/move-opened-buffer-to-target))
             (let ((origin (selected-window))
-                  (target (nano/org-scratch-target-window)))
-              (if (not (nano/org--scratch-target-usable-p target origin))
+                  (target (nano/scratch-target-window)))
+              (if (not (nano/scratch-target-usable-p target origin))
                   (let ((org-link-frame-setup (cons '(file . find-file)
                                                     org-link-frame-setup)))
                     ad-do-it)
                 (let ((origin-buf (window-buffer origin))
                       (shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
                                             (window-list nil nil))))
-                  ad-do-it
-                  (nano/org--move-opened-buffer-to-target
+                  ;; Guard: §6f advice suppressed; outer move owns relocation.
+                  (let ((nano/scratch-redirect-in-progress t))
+                    ad-do-it)
+                  (nano/move-opened-buffer-to-target
                    origin target origin-buf shown-before))))
           ad-do-it))))
   (ad-activate 'org-return))
