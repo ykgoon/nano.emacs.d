@@ -949,7 +949,12 @@ arrows (separator XPMs are GUI-only)."
             ;; session buffers (agent/model/context%/⏳🚀).  Rendered far
             ;; right, mirroring upstream.  Nil in every other buffer,
             ;; so this is a no-op there.  Guarded: skip funcall unless set.
-            (proc-raw (when mode-line-process (nano/modeline--render-process)))
+            ;; Skipped when §27c header-line is active (session + control
+            ;; buffers show full rich line on top; modeline keeps space).
+            (proc-raw (when (and mode-line-process
+                                (not (and (fboundp 'nano/opencode-header-active-p)
+                                          (nano/opencode-header-active-p))))
+                        (nano/modeline--render-process)))
             ;; Hand-rendered value may be any type; only strings display.
             ;; Literal % doubled: :eval output is %-expanded once, so a
             ;; single trailing % in "NN%" (or session "42%") gets eaten.
@@ -4115,7 +4120,12 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 ;;
 ;; Session modeline block (agent/model/context%/⏳🚀) rides on the
 ;; package's buffer-local `mode-line-process'; §6b compose renders it
-;; far right (stock nano modeline would drop that slot).
+;; far right (stock nano modeline would drop that slot) — except in
+;; session/control buffers where §27c header-line shows the full rich
+;; line instead (agent • model+variant • ctx% • tokens • $cost • MCP •
+;; branch • status; cost/tokens from opencode.db, MCP via API cache).
+;; §6b then skips proc to free modeline space.  Ex: header
+;; `🤖 build • big-pickle • 42% • 182K tok • $0.00 • MCP 1/1 • main • 🚀'.
 
 (straight-use-package
  '(opencode :type git :host codeberg :repo "sczi/opencode.el"))
@@ -4253,6 +4263,198 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 (add-hook 'opencode-session-mode-hook #'nano/opencode-setup-major-leader)
 (add-hook 'opencode-session-control-mode-hook
           #'nano/opencode-control-setup-major-leader)
+
+;; 27c. Header-line for session + control buffers (modeline space fix).
+;; Modeline proc (§6b) now skips these buffers (see
+;; `nano/opencode-header-active-p'); full rich line lives on top instead:
+;; `agent • model+variant • ctx% (tokens/limit) • $cost • MCP n • branch • ⏳/🚀'.
+;; Data: agent/model/variant/tokens/status sync in-memory (free);
+;; cost + db tokens from `~/.local/share/opencode/opencode.db' session table
+;; (has cost, tokens_*, agent, model — verified 2026-09-29, e.g. agent
+;; "plan"/"build", model JSON providerID/modelID/variant); MCP status via
+;; `opencode-api-mcps' async cache.  Render path does NO io (cached only);
+;; refresh happens on hooks/advice throttled 5s, so redisplay stays cheap.
+;; Faces: plain string, no extra faces (stay light, single truncated line).
+;; Reload-safe via remove-hook + named advice (remove before add).
+(defun nano/opencode-header-active-p ()
+  "Non-nil when current buffer shows §27c header (proc skipped in modeline)."
+  (and header-line-format
+       (derived-mode-p 'opencode-session-mode 'opencode-session-control-mode)))
+
+(defvar nano/opencode-header-db-file
+  (expand-file-name "~/.local/share/opencode/opencode.db")
+  "Opencode SQLite DB holding session cost/tokens (session table).")
+
+(defvar nano/opencode-header-mcps nil
+  "Cached MCP list as (NAME . STATUS) alists.  Refreshed async, never in render.")
+
+(defvar-local nano/opencode-header-cost nil
+  "Cached session cost from DB (float).  Nil until first refresh / on miss.")
+(defvar-local nano/opencode-header-db-tokens nil
+  "Cached total tokens (input+output) from DB as fallback when live count is nil.")
+(defvar-local nano/opencode-header-branch nil
+  "Cached git branch for session directory.")
+(defvar-local nano/opencode-header-dir nil
+  "Session worktree captured at setup; branch lookup runs here (not live default-directory).")
+(defvar-local nano/opencode-header-last-db 0
+  "Float-time of last DB/branch refresh (5s throttle).")
+
+(defun nano/opencode-header-format-tokens (n)
+  "Human short form for token count N (e.g. 181798 -> 182K)."
+  (cond ((null n) "?")
+        ((>= n 1000000) (format "%.1fM" (/ (float n) 1000000)))
+        ((>= n 1000) (format "%.0fK" (/ (float n) 1000)))
+        (t (format "%d" n))))
+
+(defun nano/opencode-header-db-get (session-id)
+  "Query DB for SESSION-ID, return (COST TOK-IN TOK-OUT) or nil.
+Opens read-only (never blocks the opencode daemon); never signals."
+  (when (and session-id (not (string-empty-p session-id))
+             (file-readable-p nano/opencode-header-db-file)
+             (require 'sqlite nil t))
+    (ignore-errors
+      (let ((db (sqlite-open nano/opencode-header-db-file t)))
+        (unwind-protect
+            (car (sqlite-select db "SELECT cost, tokens_input, tokens_output FROM session WHERE id = ?" (list session-id)))
+          (ignore-errors (sqlite-close db)))))))
+
+(defun nano/opencode-header-refresh-db (&optional force)
+  "Refresh cost/tokens/branch cache from DB (5s throttle unless FORCE).
+Runs in session buffer; no-op elsewhere.  Ends with header redisplay."
+  (when (derived-mode-p 'opencode-session-mode)
+    (let ((now (float-time)))
+      (when (or force (> (- now nano/opencode-header-last-db) 5))
+        (setq nano/opencode-header-last-db now)
+        (when-let ((sid (and (boundp 'opencode-session-id) opencode-session-id)))
+          (when-let ((row (nano/opencode-header-db-get sid)))
+            ;; Nil-preserving: DB miss/NULL hides the segment (no fake $0.00).
+            (setq nano/opencode-header-cost (nth 0 row))
+            (let ((in (nth 1 row)) (out (nth 2 row)))
+              (setq nano/opencode-header-db-tokens
+                    (when (or in out) (+ (or in 0) (or out 0)))))))
+        (setq nano/opencode-header-branch
+              (let ((default-directory (or nano/opencode-header-dir
+                                           default-directory)))
+                (when (fboundp 'magit-get-current-branch)
+                  (ignore-errors (magit-get-current-branch))))))
+      (force-mode-line-update))))
+
+(defun nano/opencode-header-refresh-mcps ()
+  "Async refresh of `nano/opencode-header-mcps' via API; keeps old cache on failure."
+  (when (and (fboundp 'opencode-api-mcps)
+             (bound-and-true-p opencode--event-subscription))
+    (ignore-errors
+      (opencode-api-mcps mcps
+        (setq nano/opencode-header-mcps
+              (mapcar (lambda (m) (cons (car m) (alist-get 'status (cdr m)))) mcps))
+        (dolist (b (buffer-list))
+          (with-current-buffer b
+            (when (derived-mode-p 'opencode-session-mode 'opencode-session-control-mode)
+              (force-mode-line-update))))))))
+
+(defun nano/opencode-header-mcp-string ()
+  "Short MCP summary from cache, or placeholder when unknown."
+  (if (null nano/opencode-header-mcps)
+      "MCP…"
+    (let ((on (seq-count (lambda (m) (string= (cdr m) "connected"))
+                         nano/opencode-header-mcps)))
+      (format "MCP %d/%d" on (length nano/opencode-header-mcps)))))
+
+(defun nano/opencode-header-width ()
+  "Width available for header text: header window width, else 80."
+  (let ((w (get-buffer-window (current-buffer) t)))
+    (if w (window-total-width w) 80)))
+
+(defun nano/opencode-header-line ()
+  "Full rich header for `opencode-session-mode'.  No IO — cached values only."
+  (let* ((agent (when (boundp 'opencode-session-agent)
+                  (and opencode-session-agent
+                       (alist-get 'name opencode-session-agent))))
+         (model-obj (when (fboundp 'opencode--current-model)
+                      (ignore-errors (opencode--current-model))))
+         (model-name (or (alist-get 'name model-obj)
+                         (when (boundp 'opencode-session-agent)
+                           (let-alist opencode-session-agent
+                             (let ((p .model.providerID) (m .model.modelID))
+                               (cond ((and p m) (concat p "/" m))
+                                     (p p) (m m)))))))
+         (variant (when (boundp 'opencode-session-agent)
+                    (alist-get 'variant opencode-session-agent)))
+          (tokens-live (when (boundp 'opencode-session-tokens) opencode-session-tokens))
+          (tokens (or tokens-live nano/opencode-header-db-tokens))
+          (limit (map-nested-elt model-obj '(limit context)))
+          (ctx (when (and tokens-live limit (> limit 0))
+                 (* 100 (/ (float tokens-live) limit))))
+         (cost nano/opencode-header-cost)
+         (status (when (boundp 'opencode-session-status)
+                   (pcase opencode-session-status
+                     ("busy" "⏳") ("idle" "🚀") (_ ""))))
+         (segs (delq nil
+                     (list (and agent (format "🤖 %s" agent))
+                           (and model-name (concat model-name
+                                                   (when variant (format " %s" variant))))
+                            (and ctx (format "%.0f%%" ctx))
+                            (when tokens
+                              (format "%s tok" (nano/opencode-header-format-tokens tokens)))
+                           (when cost (format "$%.2f" cost))
+                           (nano/opencode-header-mcp-string)
+                           nano/opencode-header-branch
+                           status)))
+          (s (string-join segs " • ")))
+     (truncate-string-to-width s (max 20 (1- (nano/opencode-header-width))) nil nil "…")))
+
+(defun nano/opencode-header-control-line ()
+  "Header for `opencode-session-control-mode': dir + MCP + hint.  No IO."
+  (let ((s (string-join
+            (delq nil (list (abbreviate-file-name (or default-directory "~"))
+                            (nano/opencode-header-mcp-string)
+                            "r redisplay"))
+             " • ")))
+     (truncate-string-to-width s (max 20 (1- (nano/opencode-header-width))) nil nil "…")))
+
+(defun nano/opencode-setup-header ()
+  "Set buffer-local header-line for opencode session buffers."
+  (setq-local nano/opencode-header-dir default-directory)
+  (setq-local header-line-format '(:eval (nano/opencode-header-line)))
+  (nano/opencode-header-refresh-db t)
+  (nano/opencode-header-refresh-mcps))
+
+(defun nano/opencode-control-setup-header ()
+  "Set buffer-local header-line for the Sessions panel."
+  (setq-local header-line-format '(:eval (nano/opencode-header-control-line)))
+  (nano/opencode-header-refresh-mcps))
+
+;; Hooks (reload-safe: remove first).
+(remove-hook 'opencode-session-mode-hook #'nano/opencode-setup-header)
+(remove-hook 'opencode-session-control-mode-hook #'nano/opencode-control-setup-header)
+(add-hook 'opencode-session-mode-hook #'nano/opencode-setup-header)
+(add-hook 'opencode-session-control-mode-hook #'nano/opencode-control-setup-header)
+
+;; Named advice fns: `advice-remove' before `advice-add' keeps
+;; `SPC f e r' reloads from stacking layers (anonymous lambdas dedupe never).
+(defun nano/opencode-header-on-status (&rest _)
+  "Throttled DB refresh after status flip (throttle honored, no FORCE)."
+  (nano/opencode-header-refresh-db))
+(defun nano/opencode-header-on-change (&rest _)
+  "Redisplay header after agent/model/variant switch (cached values only)."
+  (force-mode-line-update))
+(defun nano/opencode-header-on-toggle-mcp (&rest _)
+  "Re-poll MCP cache shortly after a toggle."
+  (run-at-time 1 nil #'nano/opencode-header-refresh-mcps))
+
+;; Refresh on state changes (all guarded, never signal into opencode flows).
+(with-eval-after-load 'opencode-sessions
+  (advice-remove 'opencode-session--set-status #'nano/opencode-header-on-status)
+  (advice-remove 'opencode-cycle-session-agent #'nano/opencode-header-on-change)
+  (advice-remove 'opencode-select-model #'nano/opencode-header-on-change)
+  (advice-remove 'opencode-select-variant #'nano/opencode-header-on-change)
+  (advice-add 'opencode-session--set-status :after #'nano/opencode-header-on-status)
+  (advice-add 'opencode-cycle-session-agent :after #'nano/opencode-header-on-change)
+  (advice-add 'opencode-select-model :after #'nano/opencode-header-on-change)
+  (advice-add 'opencode-select-variant :after #'nano/opencode-header-on-change))
+(with-eval-after-load 'opencode
+  (advice-remove 'opencode-toggle-mcp #'nano/opencode-header-on-toggle-mcp)
+  (advice-add 'opencode-toggle-mcp :after #'nano/opencode-header-on-toggle-mcp))
 
 ;; ---------------------------------------------------------------------
 ;; §28  Indentation  (global 2 spaces, Python 4)
