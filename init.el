@@ -681,14 +681,25 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
   "Selected-window highlight for modeline blocks."
   :group 'nano)
 
+(defface nano-face-header-evil-insert nil
+  "Evil insert-state tag (` I ').  Spacemacs chartreuse3 green."
+  :group 'nano)
+
+(defface nano-face-header-evil-replace nil
+  "Evil replace-state tag (` R ').  Spacemacs chocolate orange."
+  :group 'nano)
+
 (defun nano/apply-modeline-faces ()
   "Paint custom modeline block faces per theme.  Re-applied after refresh.
-Covers `nano-face-header-active' plus soft-calm `nano-face-header-critical'
-(insert ` I ', replace ` R ', modified ` ** '): stock critical is solid neon
+Covers `nano-face-header-active', `nano-face-header-critical' (modified
+` ** ' only) plus Spacemacs-state `nano-face-header-evil-insert' (` I ')
+and `nano-face-header-evil-replace' (` R '): stock critical is solid neon
 red under the §7c remap (light: Spacemacs `err' #e0211d) — alarms, not state
 tags.  Spacemacs designs state tags as medium-chroma solid blocks
-(chartreuse3 insert, chocolate replace, firebrick1 iedit-insert); follow that:
-firebrick brick-red light, nord11 muted red dark.
+(chartreuse3 insert, chocolate replace); follow that: light insert
+Spacemacs green #67b11d (§7c head3), replace Spacemacs war #dc752f (§7c);
+dark insert same #67b11d (distinct from normal sage #A3BE8C), replace Nord
+doc #D08770 (§7c2 chocolate analog).
 All bar faces get `:box nil': powerline XPM arrows read only the
 background, so the vendored 1px `:box' (`nano-faces.el', re-applied on
 every `nano-refresh-theme') draws a visible outline that breaks arrow
@@ -696,21 +707,18 @@ fusion.  Flat faces fuse; e.g. ` N ' green melts into ` init.el ' violet.
 Flushes memoized powerline arrow XPMs so separators pick up new colors."
   (when (fboundp 'powerline-reset)
     (ignore-errors (powerline-reset)))
-  (if (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
-      (progn
-        (set-face-attribute 'nano-face-header-active nil
-                            :foreground "#655370" :background "#d3d3e7"
-                            :box nil)
-        (set-face-attribute 'nano-face-header-critical nil
-                            :foreground "#fbf8ef" :background "#B22222"
-                            :box nil))
-    (progn
-      (set-face-attribute 'nano-face-header-active nil
-                          :foreground "#2E3440" :background "#A3BE8C"
-                          :box nil)
-      (set-face-attribute 'nano-face-header-critical nil
-                          :foreground "#2E3440" :background "#BF616A"
-                          :box nil)))
+  (let ((light (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))))
+    (set-face-attribute 'nano-face-header-active nil
+                        :foreground (if light "#655370" "#2E3440")
+                        :background (if light "#d3d3e7" "#A3BE8C")
+                        :box nil)
+    (let ((fg (if light "#fbf8ef" "#2E3440")))
+      (dolist (spec `(("nano-face-header-critical" ,(if light "#B22222" "#BF616A"))
+                      ("nano-face-header-evil-insert" "#67b11d")
+                      ("nano-face-header-evil-replace" ,(if light "#dc752f" "#D08770"))))
+        (set-face-attribute (intern (car spec)) nil
+                            :foreground fg :background (cadr spec)
+                            :box nil))))
   ;; Strip the vendored 1px box from every other face used in the bar.
   ;; Keeps theme fg/bg, kills only the outline so arrows fuse.
   (dolist (f '(nano-face-header-default nano-face-header-strong
@@ -746,11 +754,11 @@ Flushes memoized powerline arrow XPMs so separators pick up new colors."
              (boundp 'evil-state) evil-state)
     (let* ((active (nano/modeline-selected-p))
            (pair (cond ((eq evil-state 'normal)   '(" N " . nano-face-header-active))
-                       ((eq evil-state 'insert)   '(" I " . nano-face-header-critical))
+                       ((eq evil-state 'insert)   '(" I " . nano-face-header-evil-insert))
                        ((eq evil-state 'visual)   '(" V " . nano-face-header-salient))
                        ((eq evil-state 'emacs)    '(" E " . nano-face-header-popout))
                        ((eq evil-state 'motion)   '(" M " . nano-face-header-strong))
-                       ((eq evil-state 'replace)  '(" R " . nano-face-header-critical))
+                       ((eq evil-state 'replace)  '(" R " . nano-face-header-evil-replace))
                        ((eq evil-state 'operator) '(" O " . nano-face-header-popout))
                        (t nil))))
       (when pair
