@@ -688,22 +688,35 @@ Covers `nano-face-header-active' plus soft-calm `nano-face-header-critical'
 red under the §7c remap (light: Spacemacs `err' #e0211d) — alarms, not state
 tags.  Spacemacs designs state tags as medium-chroma solid blocks
 (chartreuse3 insert, chocolate replace, firebrick1 iedit-insert); follow that:
-firebrick brick-red light, nord11 muted red dark."
+firebrick brick-red light, nord11 muted red dark.
+All bar faces get `:box nil': powerline XPM arrows read only the
+background, so the vendored 1px `:box' (`nano-faces.el', re-applied on
+every `nano-refresh-theme') draws a visible outline that breaks arrow
+fusion.  Flat faces fuse; e.g. ` N ' green melts into ` init.el ' violet.
+Flushes memoized powerline arrow XPMs so separators pick up new colors."
+  (when (fboundp 'powerline-reset)
+    (ignore-errors (powerline-reset)))
   (if (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
       (progn
         (set-face-attribute 'nano-face-header-active nil
                             :foreground "#655370" :background "#d3d3e7"
-                            :box `(:line-width 1 :color ,nano-color-background :style nil))
+                            :box nil)
         (set-face-attribute 'nano-face-header-critical nil
                             :foreground "#fbf8ef" :background "#B22222"
-                            :box `(:line-width 1 :color ,nano-color-background :style nil)))
+                            :box nil))
     (progn
       (set-face-attribute 'nano-face-header-active nil
                           :foreground "#2E3440" :background "#A3BE8C"
-                          :box `(:line-width 1 :color ,nano-color-background :style nil))
+                          :box nil)
       (set-face-attribute 'nano-face-header-critical nil
                           :foreground "#2E3440" :background "#BF616A"
-                          :box `(:line-width 1 :color ,nano-color-background :style nil)))))
+                          :box nil)))
+  ;; Strip the vendored 1px box from every other face used in the bar.
+  ;; Keeps theme fg/bg, kills only the outline so arrows fuse.
+  (dolist (f '(nano-face-header-default nano-face-header-strong
+               nano-face-header-salient nano-face-header-popout
+               nano-face-header-faded))
+    (ignore-errors (set-face-attribute f nil :box nil))))
 
 (nano/apply-modeline-faces)
 (when (fboundp 'nano-refresh-theme)
@@ -744,17 +757,20 @@ firebrick brick-red light, nord11 muted red dark."
         (propertize (car pair)
                     'face (if active (cdr pair) 'nano-face-header-strong))))))
 
-;; Narrow (><) + TRAMP (@host) flags. Buffer-local checks only.
+;; Narrow (><) + TRAMP (@host) flags, one faced string per flag.
+;; List form so the composer can arrow-fuse each flag with its own
+;; neighbors; e.g. `(" >< " popout) (" @host " faded)'.
 (defun nano/modeline-extra-flags ()
-  "Return propertized narrow/remote flag string, or nil."
+  "Return list of propertized narrow/remote flag strings, or nil.
+Buffer-local checks only."
   (let ((narrow (and (fboundp 'buffer-narrowed-p) (ignore-errors (buffer-narrowed-p))))
         (host (ignore-errors (file-remote-p default-directory 'host)))
-        (s ""))
+        (out nil))
     (when narrow
-      (setq s (concat s (propertize " >< " 'face 'nano-face-header-popout))))
+      (push (propertize " >< " 'face 'nano-face-header-popout) out))
     (when (and host (not (string-empty-p host)))
-      (setq s (concat s (propertize (format " @%s " host) 'face 'nano-face-header-faded))))
-    (unless (string-empty-p s) s)))
+      (push (propertize (format " @%s " host) 'face 'nano-face-header-faded) out))
+    (nreverse out)))
 
 ;; Selection info. Replaces position with L:C while region is active.
 (defun nano/modeline-selection-string ()
@@ -821,26 +837,102 @@ which duplicated the filename in the modeline."
            (ignore-errors (eval (cadr mlp) nil)))
           (t (ignore-errors (format-mode-line mlp))))))
 
+;; Arrow separators — same powerline XPM method as the (now removed)
+;; elfeed header (`elfeed-goodies/powerline-default-separator', default
+;; `arrow-fade').  No new install: powerline ships as a goodies dep and
+;; is already in `straight/repos/'.  Per-separator XPMs memoize per
+;; (face1,face2,height) in a frame-local cache, so steady-state cost is
+;; a hash lookup per redisplay; flush via `powerline-reset' on theme
+;; change (see `nano/apply-modeline-faces').  TTY/batch returns nil and
+;; collapses to the flat look — same as the old header did.
+(defun nano/modeline--separator-fn (dir)
+  "Powerline separator fn for DIR (`left'/`right'), tracking elfeed style."
+  (let* ((sep (if (and (boundp 'elfeed-goodies/powerline-default-separator)
+                       elfeed-goodies/powerline-default-separator)
+                  elfeed-goodies/powerline-default-separator
+                'arrow-fade))
+         (pdir (if (boundp 'powerline-default-separator-dir)
+                   (if (eq dir 'left)
+                       (car powerline-default-separator-dir)
+                     (cdr powerline-default-separator-dir))
+                 dir)))
+    (intern (format "powerline-%s-%s" sep pdir))))
+
+(defun nano/modeline--sep-img (dir face1 face2 &optional sep-fn gui-p)
+  "Raw powerline arrow image for FACE1 -> FACE2, or nil when unavailable.
+Returns the image spec itself (NOT a rendered string) so callers can
+push it into a `powerline-render' list exactly like elfeed-goodies
+does (`search-header/draw-wide').  `powerline-render' handles the
+image->space conversion (`pl/render'); pre-rendering then concat'ing
+breaks width math.  Same face twice, TTY/batch, or missing powerline
+returns nil (flat look).
+Optional SEP-FN avoids per-separator `format'/`intern'; GUI-P avoids
+re-testing `window-system' per gap — callers hoist both once per
+compose."
+  (when (and (if (null gui-p) window-system gui-p) (not (eq face1 face2)))
+    (when (or (fboundp 'powerline-arrow-fade-left)
+              (ignore-errors (require 'powerline nil t)))
+      (let ((fn (or sep-fn (nano/modeline--separator-fn dir))))
+        (when (fboundp fn)
+          (ignore-errors (funcall fn face1 face2)))))))
+
+;; Stale single-arrow renderer from the first arrows pass; the composer
+;; below now threads raw images through `powerline-render' instead.
+;; Drop it so reloads (`SPC f e r') don't leave two separator paths.
+(when (fboundp 'nano/modeline--separator)
+  (fmakunbound 'nano/modeline--separator))
+
+(defun nano/modeline--pair (s &optional default-face)
+  "Split faced string S into a (TEXT . FACE) block pair, or nil when empty.
+FACE is the face at position 0; falls back to DEFAULT-FACE (bar
+default) for unpropertized upstream strings like `primary'."
+  (when (and s (not (string-empty-p s)))
+    (cons (substring-no-properties s)
+          (or (get-text-property 0 'face s)
+              default-face
+              'nano-face-header-default))))
+
+(defun nano/modeline--render-side (dir pairs &optional sep-fn gui-p)
+  "Build a `powerline-render' list for one side, arrow at every bg change.
+DIR is `left' (LHS) or `right' (RHS); PAIRS are (TEXT . FACE) blocks
+in display order.  Empty texts skipped; equal adjacent faces joined
+without an arrow (a same-face arrow renders as an invisible gap).
+Optional SEP-FN / GUI-P are hoisted per compose (see `nano/modeline--sep-img').
+Requires `powerline-raw'; callers fall back to flat concat without it."
+  (let (out prev-face)
+    (dolist (p pairs)
+      (when (and (car-safe p) (not (string-empty-p (car p))))
+        (let ((face (or (cdr p) 'nano-face-header-default)))
+          (when (and prev-face (not (eq prev-face face)))
+            (let ((img (nano/modeline--sep-img dir prev-face face sep-fn gui-p)))
+              (when img (push img out))))
+          (push (powerline-raw (car p) face) out)
+          (setq prev-face face))))
+    (list (nreverse out) prev-face)))
+
 ;; Drop the old status-prefix advice on reload; the redefinition below
 ;; renders winum + workspace as their own blocks instead.
 (advice-remove 'nano-modeline-compose 'nano-winum-prefix)
 
 (with-eval-after-load 'nano-modeline
   (defun nano-modeline-compose (status name primary secondary)
-    "Spacemacs-block modeline: winum, evil-state, RO/RW/**/narrow/remote, filename, far-right workspace + scroll percent.
-Drops low-priority blocks on narrow columns; selection replaces position."
-    (let* ((char-width    (window-font-width nil 'mode-line))
-           (space-up       +0.15)
-           (space-down     -0.20)
-           (winum (nano/winum-number-string))
-           (evil (nano/evil-state-string))
-           (extra (nano/modeline-extra-flags))
-           (sel (nano/modeline-selection-string))
-           (ww (window-total-width))
+    "Spacemacs-fused modeline: arrow at every block background change.
+LHS blocks: winum, evil-state, RO/RW/**/narrow/remote, filename,
+primary (mode/branch).  RHS blocks: proc/session, secondary/position,
+workspace, scroll percent.  E.g.
+` 1  N  RW  init.el (emacs-lisp) … <main>  Bot '
+with `>' arrows melting each block into the next, like the removed
+elfeed header and Spacemacs spaceline.
+Drops low-priority blocks on narrow columns; selection replaces
+position.  Flat concat when powerline is missing (fresh boot before
+goodies installs); TTY keeps alignment via `powerline-fill' with nil
+arrows (separator XPMs are GUI-only)."
+    (let* ((ww (window-total-width))
            ;; Width-gated blocks.
            (ws-full (nano/workspace-name-string))
            (ws (if (< ww nano/modeline-truncate-ws-width) nil ws-full))
            (primary-eff (if (< ww nano/modeline-truncate-primary-width) "" primary))
+           (sel (nano/modeline-selection-string))
            (secondary-base (or sel secondary))
            (secondary-eff (if (or sel (>= ww nano/modeline-truncate-secondary-width))
                               secondary-base ""))
@@ -849,7 +941,11 @@ Drops low-priority blocks on narrow columns; selection replaces position."
             ;; session buffers (agent/model/context%/⏳🚀).  Rendered far
             ;; right, mirroring upstream.  Nil in every other buffer,
             ;; so this is a no-op there.  Guarded: skip funcall unless set.
-            (proc (when mode-line-process (nano/modeline--render-process)))
+            (proc-raw (when mode-line-process (nano/modeline--render-process)))
+            ;; Hand-rendered value may be any type; only strings display.
+            ;; Literal % doubled: :eval output is %-expanded once, so a
+            ;; single trailing % in "NN%" (or session "42%") gets eaten.
+            (proc (when (stringp proc-raw) (string-replace "%" "%%" proc-raw)))
            (active (nano/modeline-selected-p))
            ;; RO/RW both faded grey, ** critical.
            (prefix (let* ((code (cond ((string-suffix-p "RO" status) "RO")
@@ -869,52 +965,63 @@ Drops low-priority blocks on narrow columns; selection replaces position."
                                               (if (window-dedicated-p) "--" code) " "))
                                   status)))
                      (propertize text 'face face)))
-           (sep (propertize " " 'face 'nano-face-header-default
-                            'display `(raise ,space-down)))
-           (head (concat
-                  (or winum "")
-                  (or evil "")
-                  sep
-                   prefix
-                   (or extra "")
-                   (propertize (concat " " name " ")
-                               'face (if active
-                                         'nano-face-header-active
-                                       'nano-face-header-strong))
-                  (propertize primary-eff 'face 'nano-face-header-default
-                              'display `(raise ,space-up))))
-            (pct-text (concat " " (nano/modeline-scroll-percent) " "))
-            (pct-display (propertize pct-text
-                           'face 'nano-face-header-default
-                           'display `(raise ,space-up)))
-            ;; Literal % must be doubled for mode-line: :eval output is
-            ;; %-expanded, so single trailing % in "NN%" gets eaten.
-            ;; Escape after width math so filler count uses display width.
-            (pct (propertize (string-replace "%" "%%" pct-text)
-                           'face 'nano-face-header-default
-                           'display `(raise ,space-up)))
-            ;; proc goes first (far right); prepended in both so filler
-            ;; width math stays exact.  Indicator text contains %% which
-            ;; collapses to % on the single outer %-expansion.
-            (right (concat (or proc "") secondary-eff
-                           (propertize " " 'face 'nano-face-header-default
-                                       'display `(raise ,space-down))
-                           (or ws "")
-                           pct))
-            (right-for-width (concat (or proc "") secondary-eff
-                                     (propertize " " 'face 'nano-face-header-default
-                                                 'display `(raise ,space-down))
-                                     (or ws "")
-                                     pct-display))
-            (available-width (- ww
-                                 (length head) (length right-for-width)
-                                 (/ (window-right-divider-width) char-width)))
-           (available-width (max 1 available-width)))
-      (concat head
-              (propertize (make-string available-width ?\ )
-                          'face 'nano-face-header-default)
-              (propertize right 'face `(:inherit nano-face-header-default
-                                                 :foreground ,nano-color-faded)))))
+           (name-face (if active
+                           'nano-face-header-active
+                         'nano-face-header-strong))
+           (B #'nano/modeline--pair)
+           (lhs-pairs (delq nil
+                            (append (list (funcall B (nano/winum-number-string))
+                                          (funcall B (nano/evil-state-string))
+                                          (funcall B prefix))
+                                    (mapcar B (nano/modeline-extra-flags))
+                                    (list (funcall B (propertize (concat " " name " ")
+                                                                 'face name-face))
+                                          (funcall B primary-eff)))))
+           (pct (string-replace "%" "%%"
+                                (concat " " (nano/modeline-scroll-percent) " ")))
+           (rhs-pairs (delq nil (list (funcall B proc)
+                                      (funcall B secondary-eff)
+                                      (funcall B ws)
+                                      (funcall B pct)))))
+      (unless (fboundp 'powerline-raw)
+        (ignore-errors (require 'powerline nil t)))
+      (if (not (and (fboundp 'powerline-raw) (fboundp 'powerline-render)
+                    (fboundp 'powerline-fill) (fboundp 'powerline-width)))
+          ;; Flat fallback (fresh boot, powerline missing): same blocks,
+          ;; filler keeps RHS right-aligned like the old concat path.
+          (let* ((lhs (mapconcat (lambda (p) (propertize (car p) 'face (cdr p)))
+                                 lhs-pairs ""))
+                 (rhs (mapconcat (lambda (p) (propertize (car p) 'face (cdr p)))
+                                 rhs-pairs ""))
+                 (fill (max 1 (- ww (string-width lhs) (string-width rhs)))))
+            (concat lhs
+                    (propertize (make-string fill ?\ ) 'face 'nano-face-header-default)
+                    rhs))
+        ;; Powerline pipeline, same shape as the removed elfeed header:
+        ;; render LHS, stretch-fill, render RHS.  Arrows fuse because
+        ;; every bg change carries a separator and all faces are flat
+        ;; (`:box nil' in `nano/apply-modeline-faces').
+        ;; Hoist per-compose invariants: GUI flag + separator fns, so
+        ;; per-gap cost is hash lookup + funcall, no format/intern.
+        (let* ((gui window-system)
+               (fn-l (nano/modeline--separator-fn 'left))
+               (fn-r (nano/modeline--separator-fn 'right))
+               (lhs-res (nano/modeline--render-side 'left lhs-pairs fn-l gui))
+               (lhs (car lhs-res))
+               (lhs-last (cadr lhs-res))
+               ;; Cap a colored trailing block with an arrow into the
+               ;; filler: when `primary' truncates away, the bar ends on
+               ;; the filename block and would otherwise hard-edge.
+               (lhs (if (and lhs-last (not (eq lhs-last 'nano-face-header-default)))
+                        (let ((img (nano/modeline--sep-img
+                                    'left lhs-last 'nano-face-header-default fn-l gui)))
+                          (if img (append lhs (list img)) lhs))
+                      lhs))
+               (rhs (car (nano/modeline--render-side 'right rhs-pairs fn-r gui)))
+               (reserve (powerline-width rhs)))
+          (concat (powerline-render lhs)
+                  (powerline-fill 'nano-face-header-default reserve)
+                  (powerline-render rhs))))))
   ;; Bottom bar — replaces vendored nano-modeline.el installer edit.
   ;; Upstream `nano-modeline' installs on header-line (top) and
   ;; `nano-modeline-update-windows' hides mode-line per window.
@@ -3696,14 +3803,22 @@ minus the feed source column so titles gain its width."
     ;; back to title-only per wide-threshold.
     (setq elfeed-search-print-entry-function #'nano/elfeed-entry-line-draw)
     (elfeed-search-update :force))
-  (unless (featurep 'elfeed-goodies-search-mode)
-    (message "nano: elfeed-goodies-search-mode missing, using built-in header"))
-  (setq elfeed-search-header-function #'nano/elfeed-search-header))
+  ;; Top header redundant with bottom modeline (§6b): kill it.
+  ;; `elfeed-search-mode' sets buffer-local `header-line-format' via
+  ;; `elfeed--header-line-format', so nil it per buffer (hook runs
+  ;; after mode body) + neuter the generator for fresh buffers.
+  ;; Counts/filter/sort/update stay visible in
+  ;; `nano-modeline-elfeed-search-mode' below.
+  (setq elfeed-search-header-function #'ignore)
+  (add-hook 'elfeed-search-mode-hook #'nano/elfeed-kill-header-line))
+(with-eval-after-load 'elfeed-tree
+  (setq elfeed-tree-header-function #'ignore)
+  (add-hook 'elfeed-tree-mode-hook #'nano/elfeed-kill-header-line))
 
 ;; Bottom modeline (§6b bar) sort indicator — overrides vendored
 ;; `nano-modeline-elfeed-search-mode' (nano-modeline.el:123) which
-;; shows no sort state.  Top powerline header keeps its own [label]
-;; prefix as fallback; this is the visible one on the bottom bar.
+;; shows no sort state.  Sole sort/counts/filter/update display now
+;; top header is gone (above).
 (with-eval-after-load 'nano-modeline
   (defun nano-modeline-elfeed-search-mode ()
     (nano-modeline-compose (nano-modeline-status)
@@ -3711,6 +3826,10 @@ minus the feed source column so titles gain its width."
                            (concat "(" (nano/elfeed-sort-label) ") "
                                    "(" (elfeed-search--header) ")")
                            "")))
+
+(defun nano/elfeed-kill-header-line ()
+  "Nil buffer-local header line (reload-safe named hook fn)."
+  (setq-local header-line-format nil))
 
 (with-eval-after-load 'evil
   (with-eval-after-load 'elfeed-search
