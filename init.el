@@ -38,6 +38,7 @@
 ;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
 ;;   §27  OpenCode  (codeberg/sczi, SPC a c, lazy)
 ;;   §28  Indentation  (global 2 spaces, Python 4)
+;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
 ;; =====================================================================
 
 
@@ -4605,6 +4606,40 @@ Runs in session buffer; no-op elsewhere.  Ends with header redisplay."
 (remove-hook 'python-ts-mode-hook #'nano/python-set-tab-width)
 (add-hook 'python-mode-hook #'nano/python-set-tab-width)
 (add-hook 'python-ts-mode-hook #'nano/python-set-tab-width)
+
+
+;; ---------------------------------------------------------------------
+;; §29  Shell  (builtins, SPC ' + SPC a t, lazy)
+;; ---------------------------------------------------------------------
+;; Zero-dep: built-in eshell/shell/term/ansi-term + project-eshell only.
+;; No vterm/eat/shell-pop (compiler/fetch/split mgmt, add on demand).
+;; Plain `switch-to-buffer' open; §6f scratch routing applies (visible
+;; *scratch* window receives first open, focus follows).  Shell buffers
+;; never persist via desktop (like *scratch*), no handler needed.
+;; $SHELL respected (`explicit-shell-file-name' untouched, zsh here).
+;; term char mode eats SPC: use C-SPC leader fallback (§4) or C-c C-j
+;; line mode.  §2b2 term-sentinel advice already kills term buffer on exit.
+;; No `require': all commands autoload.  Reload-safe via `SPC f e r'.
+;; Example: `SPC '' eshell here, `SPC p '' eshell at project root.
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'eshell-mode 'insert)
+  (evil-set-initial-state 'shell-mode 'insert)
+  (evil-set-initial-state 'term-mode 'insert))
+
+(define-key spacemacs-leader-map (kbd "'") 'eshell)
+(define-key spacemacs-leader-map (kbd "a t e") 'eshell)
+(define-key spacemacs-leader-map (kbd "a t s") 'shell)
+(define-key spacemacs-leader-map (kbd "a t t") 'term)
+(define-key spacemacs-leader-map (kbd "a t a") 'ansi-term)
+(define-key spacemacs-leader-map (kbd "p '") 'project-eshell)
+(which-key-add-key-based-replacements
+  "SPC '" "eshell"
+  "SPC a t" "shell/terminal"
+  "SPC a t e" "eshell"
+  "SPC a t s" "shell"
+  "SPC a t t" "term"
+  "SPC a t a" "ansi-term"
+  "SPC p '" "project eshell")
 
 ;;; init.el ends here
 (custom-set-variables
