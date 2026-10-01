@@ -2321,8 +2321,9 @@ Skips empty lines, truncates long lines for display."
 ;; Buffer-only, Spacemacs `SPC z x' parity.  Zero-dep: built-in
 ;; text-scale.el only.  Frame zoom skipped (needs zoom-frm).
 ;; Step 0.5 matches Spacemacs `spacemacs/scale-up-or-down-font-size'.
-;; Each entry re-arms `set-transient-map' so + - 0 repeat without
-;; re-pressing SPC; q or any other key exits.
+;; Each entry re-arms `set-transient-map' (one-shot, keep-pred nil) so
+;; + - 0 repeat without re-pressing SPC; q never re-arms so it exits,
+;; as does any foreign key.
 (defvar nano/zoom-step 0.5
   "Font scale step for `nano/zoom-in' / `nano/zoom-out'.")
 
@@ -2341,11 +2342,11 @@ Skips empty lines, truncates long lines for display."
 
 (defun nano/zoom-transient-activate ()
   "Re-arm zoom repeat map with hint in echo area."
-  (set-transient-map nano/zoom-repeat-map t)
-  (message "zoom [+/=/k] in [-/_/j] out [0] reset [q] quit (%+d)"
-           (or (and (boundp 'text-scale-mode-amount)
-                    text-scale-mode-amount)
-               0)))
+  (set-transient-map nano/zoom-repeat-map nil)
+  (message "zoom [+/=/k] in [-/_/j] out [0] reset [q] quit (%+.1f)"
+           (float (or (and (boundp 'text-scale-mode-amount)
+                           text-scale-mode-amount)
+                      0))))
 
 (defun nano/zoom-in ()
   "Scale buffer font up by `nano/zoom-step', then repeat."
@@ -2368,6 +2369,7 @@ Skips empty lines, truncates long lines for display."
 (defun nano/zoom-quit ()
   "Quit zoom repeat transient."
   (interactive)
+  (setq overriding-terminal-local-map nil)
   (message "zoom quit"))
 
 (define-key spacemacs-leader-map (kbd "z x +") 'nano/zoom-in)
@@ -4377,7 +4379,7 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 ;; 27c. Header-line for session + control buffers (modeline space fix).
 ;; Modeline proc (§6b) now skips these buffers (see
 ;; `nano/opencode-header-active-p'); full rich line lives on top instead:
-;; `agent • model+variant • ctx% (tokens/limit) • $cost • MCP n • branch • ⏳/🚀'.
+;; `⏳/🚀 • agent • model+variant • ctx%% (tokens/limit) • $cost • MCP n • branch'.
 ;; Data: agent/model/variant/tokens/status sync in-memory (free);
 ;; cost + db tokens from `~/.local/share/opencode/opencode.db' session table
 ;; (has cost, tokens_*, agent, model — verified 2026-09-29, e.g. agent
@@ -4498,18 +4500,19 @@ Runs in session buffer; no-op elsewhere.  Ends with header redisplay."
          (cost nano/opencode-header-cost)
          (status (when (boundp 'opencode-session-status)
                    (pcase opencode-session-status
-                     ("busy" "⏳") ("idle" "🚀") (_ ""))))
+                     ("busy" "⏳") ("idle" "🚀") (_ nil))))
          (segs (delq nil
-                     (list (and agent (format "🤖 %s" agent))
+                     (list status
+                           (and agent (format "🤖 %s" agent))
                            (and model-name (concat model-name
                                                    (when variant (format " %s" variant))))
-                            (and ctx (format "%.0f%%" ctx))
-                            (when tokens
-                              (format "%s tok" (nano/opencode-header-format-tokens tokens)))
+                           ;; Double %%: header-line eats one, displays one.
+                           (and ctx (format "%.0f%%%%" ctx))
+                           (when tokens
+                             (format "%s tok" (nano/opencode-header-format-tokens tokens)))
                            (when cost (format "$%.2f" cost))
                            (nano/opencode-header-mcp-string)
-                           nano/opencode-header-branch
-                           status)))
+                           nano/opencode-header-branch)))
           (s (string-join segs " • ")))
      (truncate-string-to-width s (max 20 (1- (nano/opencode-header-width))) nil nil "…")))
 
