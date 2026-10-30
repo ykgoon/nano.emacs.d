@@ -3,12 +3,11 @@
 Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), managed by straight.el. Local git repo only (syncthing path, no remote). No tests/CI/lint.
 
 ## Launch / layout
-- NOT `~/.emacs.d`: `~/.emacs.d` hosts a different production distro — never touch it.
-- Always launch with `emacs --init-directory ~/nano.emacs.d` (Emacs 30 supports this). Needs `Noto Sans Mono` system-wide.
+- Needs `Noto Sans Mono` system-wide.
 - `init.el` — only real config: bootstraps straight.el, sets font, installs `nano`, `(require 'nano)`. Everything resolves off `user-emacs-directory` (= launch dir).
 - `early-init.el` — `package-enable-at-startup nil`; package.el disabled.
 - `straight/repos/` — vendored git clones of every package. `straight/build-cache.el` = straight recipe cache. `elpa/`, `eln-cache/`, `auto-save-list/` = caches/runtime; ignore unless packaging.
-- Sanity check: `emacs --batch --eval '(setq user-emacs-directory "~/nano.emacs.d/")' -l ~/nano.emacs.d/init.el --eval '(message "nano=%s" (featurep (quote nano)))'` (NOTE: `--init-directory` does NOT load init in `--batch` mode — use `-l`. The `--eval setq` is REQUIRED: bare `-l` leaves `user-emacs-directory` at `~/.emacs.d` (production), and straight then installs missing packages THERE — polluting the production distro)
+- Sanity check: `emacs --batch --eval '(setq user-emacs-directory "~/.emacs.d/")' -l ~/.emacs.d/init.el --eval '(message "nano=%s" (featurep (quote nano)))'`
 - Testing: if `emacs` run needed, use no-window mode (`--batch` or `-nw`) so output visible to agent; never launch GUI emacs
 
 ## Gotchas
@@ -27,5 +26,5 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 
 ## UX/UI Reference
 - Future features needing UX/UI design — learn from Spacemacs as primary reference (mnemonic SPC leader, which-key, transient states, layer organization).
-- Spacemacs impl at `~/.emacs.d` — read-only reference. Inspect via `Read`/`Grep` (e.g., `core/core-keybindings.el`, `core/core-documentation.el`, `layers/`); never `Edit`/`Write` there. Complements Launch rule: `~/.emacs.d` hosts production distro — do not modify, read only.
+- Spacemacs impl at `~/spacemacs.emacs.d` — read-only reference. Inspect via `Read`/`Grep` (e.g., `core/core-keybindings.el`, `core/core-documentation.el`, `layers/`); never `Edit`/`Write` there. Complements Launch rule: `~/spacemacs.emacs.d` hosts Spacemacs distro — do not modify, read only.
 - This repo currently minimal (`init.el` already seeds `spacemacs-leader-map` + `which-key`); future builds extend that pattern while staying light.
