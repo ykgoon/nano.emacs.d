@@ -15,7 +15,7 @@
 ;;   §3  Vim emulation  (evil + which-key)
 ;;   §4  SPC leader definition  (native, no general.el)
 ;;   §5  Leader keybindings  (file / buffer / window / quit / search)
-;;   §6  Window management  (winum, header-line, double/triple columns, uniform widths)
+;;   §6  Window management  (winum, header-line, double/triple/quad columns, uniform widths)
 ;;   §7  Theme toggle + persistence + spacemacs-light/nord-dark faces  (SPC t n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
 ;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
@@ -514,7 +514,7 @@ Fresh buffer defaults to `org-mode'."
 (define-key spacemacs-leader-map (kbd "w l") 'evil-window-right)
 (define-key spacemacs-leader-map (kbd "w r") 'nano/window-rotate-forward)  ; rotate right
 (define-key spacemacs-leader-map (kbd "w R") 'nano/window-rotate-backward) ; rotate left
-;; SPC w 2 / SPC w 3 (double/triple columns) defined in §6c — kept with its implementation.
+;; SPC w 2 / SPC w 3 / SPC w 4 (double/triple/quad columns) defined in §6c — kept with its implementation.
 
 ;; 5d. Quit / session  (SPC q)
 ;; SPC q q / SPC q r save + restore file buffers, window splits (§6),
@@ -643,7 +643,7 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
 
 
 ;; ---------------------------------------------------------------------
-;; §6  Window management  (winum, header-line, double/triple columns, uniform widths, scratch routing)
+;; §6  Window management  (winum, header-line, double/triple/quad columns, uniform widths, scratch routing)
 ;; ---------------------------------------------------------------------
 
 ;; 6a. Window numbers — winum (deb0ch/emacs-winum)
@@ -1050,11 +1050,11 @@ arrows (separator XPMs are GUI-only)."
       (setq-default header-line-format nil)))
   (force-mode-line-update t))
 
-;; 6c. Double / triple vertical split — SPC w 2 / SPC w 3
+;; 6c. Double / triple / quad vertical split — SPC w 2 / SPC w 3 / SPC w 4
 ;;     (basic SPC w splits live in §5c — this extends that group).
-;;     Creates two / three balanced vertical columns in current frame.
-;;     Populates w2/w3 from eligible buffers (skips ephemeral " *..." buffers).
-;;     C-u SPC w 2 / C-u SPC w 3 (purge) forces delete-other-windows ignoring window-parameters
+;;     Creates two / three / four balanced vertical columns in current frame.
+;;     Populates w2/w3/w4 from eligible buffers (skips ephemeral " *..." buffers).
+;;     C-u SPC w 2 / C-u SPC w 3 / C-u SPC w 4 (purge) forces delete-other-windows ignoring window-parameters
 ;;     (e.g. pinned side windows that normally resist deletion).
 (defun nano/window-split-eligible-buffers ()
   "Buffers to populate after split, excluding ephemeral * spaced names."
@@ -1093,10 +1093,30 @@ arrows (separator XPMs are GUI-only)."
           (nano/balance-window-widths))
       (message "SPC w 3: frame too narrow to split"))))
 
+(defun nano/window-split-quad-columns (&optional purge)
+  "Four vertical columns, balanced.  With PURGE (C-u), use `delete-other-windows' ignoring window params."
+  (interactive "P")
+  (if purge
+      (let ((ignore-window-parameters t)) (delete-other-windows))
+    (delete-other-windows))
+  (let* ((bufs (nano/window-split-eligible-buffers))
+         (w2 (ignore-errors (split-window-right)))
+         (w3 (when w2 (ignore-errors (split-window w2 nil 'right))))
+         (w4 (when w3 (ignore-errors (split-window w3 nil 'right)))))
+    (if (and w2 w3 w4)
+        (progn
+          (set-window-buffer w2 (or (nth 1 bufs) "*scratch*"))
+          (set-window-buffer w3 (or (nth 2 bufs) "*scratch*"))
+          (set-window-buffer w4 (or (nth 3 bufs) "*scratch*"))
+          (nano/balance-window-widths))
+      (message "SPC w 4: frame too narrow to split"))))
+
 (define-key spacemacs-leader-map (kbd "w 2") 'nano/window-split-double-columns)
 (define-key spacemacs-leader-map (kbd "w 3") 'nano/window-split-triple-columns)
+(define-key spacemacs-leader-map (kbd "w 4") 'nano/window-split-quad-columns)
 (which-key-add-key-based-replacements "SPC w 2" "double columns"
-  "SPC w 3" "triple columns")
+  "SPC w 3" "triple columns"
+  "SPC w 4" "quad columns")
 
 ;; 6d. Window rotation — SPC w r / SPC w R (Spacemacs parity, rotate all)
 ;;     SPC w r → forward (right), SPC w R → backward (left).
