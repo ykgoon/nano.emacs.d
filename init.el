@@ -1947,7 +1947,17 @@ normal).  One retry on failure, then warn."
           (with-current-buffer buf
             (when (and (derived-mode-p 'magit-mode)
                        (memq evil-state '(emacs insert)))
-              (evil-motion-state))))))
+              (evil-motion-state))))
+        ;; Re-apply the magit M-0..M-9 winum rebind: collection setup
+        ;; (just ran) re-copied stock show-level-*-all into the state
+        ;; keymaps, re-shadowing winum on fresh launches — previously
+        ;; only healed by the next `SPC f e r'.
+        ;; Registered AFTER `evil-collection-init' above, so these fire
+        ;; after the collection's own load hooks even when init was
+        ;; triggered early (e.g. elfeed before magit's first load).
+        (with-eval-after-load 'magit (nano/magit-winum-rebind))
+        (with-eval-after-load 'magit-section (nano/magit-winum-rebind))
+        (nano/magit-winum-rebind)))
     (when nano/evil-collection-initialized
       (setq nano/evil-collection-retries 0))))
 (with-eval-after-load 'magit (nano/evil-collection-ensure))
@@ -1971,7 +1981,17 @@ normal).  One retry on failure, then warn."
 ;; same technique as SPC above.  Covers all magit modes (parent map).
 ;; Displaced show-level-*-all -> C-M-1..C-M-4 (free, checked).
 ;; M-0 extra vs Spacemacs (they bind 1..9 only); keeps §6 0-or-10.
-(with-eval-after-load 'magit-section
+;; Applied on `magit-section' load, AND re-applied after
+;; `evil-collection-init' (see `nano/evil-collection-ensure'): its
+;; `evil-collection-magit-setup' re-copies the stock M-1..M-4 into the
+;; state keymaps after this load hook ran — collection init fires at
+;; `magit' load, `magit-section' already being loaded and rebound —
+;; so without the re-run, stock show-level-*-all re-shadowed winum in
+;; normal state on every fresh launch, only healed by the next
+;; `SPC f e r'.
+(defun nano/magit-winum-rebind ()
+  "Bind M-0..M-9 to winum in `magit-section-mode-map'.
+Covers every evil state magit uses (normal + motion).  Idempotent."
   (with-eval-after-load 'evil
     (when (boundp 'magit-section-mode-map)
       (evil-define-key '(normal motion) magit-section-mode-map
@@ -1989,6 +2009,7 @@ normal).  One retry on failure, then warn."
         (kbd "C-M-2") 'magit-section-show-level-2-all
         (kbd "C-M-3") 'magit-section-show-level-3-all
         (kbd "C-M-4") 'magit-section-show-level-4-all))))
+(with-eval-after-load 'magit-section (nano/magit-winum-rebind))
 
 ;; 10a. Bindings
 (define-key spacemacs-leader-map (kbd "g s") 'magit-status)
