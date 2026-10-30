@@ -1053,62 +1053,62 @@ arrows (separator XPMs are GUI-only)."
 ;; 6c. Double / triple / quad vertical split — SPC w 2 / SPC w 3 / SPC w 4
 ;;     (basic SPC w splits live in §5c — this extends that group).
 ;;     Creates two / three / four balanced vertical columns in current frame.
-;;     Populates w2/w3/w4 from eligible buffers (skips ephemeral " *..." buffers).
+;;     Every pane — including the current one — lands on `*scratch*': a
+;;     clean layout, not a buffer shuffle.  Existing buffers stay open
+;;     elsewhere (return via M-1..M-4).  The single `*scratch*' is
+;;     shared, so panes stay in sync; point is left untouched.
 ;;     C-u SPC w 2 / C-u SPC w 3 / C-u SPC w 4 (purge) forces delete-other-windows ignoring window-parameters
 ;;     (e.g. pinned side windows that normally resist deletion).
-(defun nano/window-split-eligible-buffers ()
-  "Buffers to populate after split, excluding ephemeral * spaced names."
-  (seq-remove (lambda (b)
-                (and (string= (substring (buffer-name b) 0 1) " ")
-                     (not (buffer-file-name b))))
-              (buffer-list)))
+(defun nano/window-set-scratch-columns (wins)
+  "Point every window in WINS at `*scratch*'; balance widths.
+Return t on success, nil when no `*scratch*' buffer exists."
+  (let ((scratch (get-buffer "*scratch*")))
+    (when scratch
+      (dolist (w wins)
+        (set-window-buffer w scratch))
+      (nano/balance-window-widths)
+      t)))
 
 (defun nano/window-split-double-columns (&optional purge)
-  "Two vertical columns, balanced.  With PURGE (C-u), use `delete-other-windows' ignoring window params."
+  "Two vertical columns, balanced, every pane on `*scratch*'.
+With PURGE (C-u), use `delete-other-windows' ignoring window params."
   (interactive "P")
   (if purge
       (let ((ignore-window-parameters t)) (delete-other-windows))
     (delete-other-windows))
-  (let* ((bufs (nano/window-split-eligible-buffers))
-         (w2 (ignore-errors (split-window-right))))
+  (let ((w2 (ignore-errors (split-window-right))))
     (if w2
-        (progn
-          (set-window-buffer w2 (or (nth 1 bufs) "*scratch*"))
-          (nano/balance-window-widths))
+        (or (nano/window-set-scratch-columns (list (selected-window) w2))
+            (message "SPC w 2: no *scratch* buffer"))
       (message "SPC w 2: frame too narrow to split"))))
 
 (defun nano/window-split-triple-columns (&optional purge)
-  "Three vertical columns, balanced.  With PURGE (C-u), use `delete-other-windows' ignoring window params."
+  "Three vertical columns, balanced, every pane on `*scratch*'.
+With PURGE (C-u), use `delete-other-windows' ignoring window params."
   (interactive "P")
   (if purge
       (let ((ignore-window-parameters t)) (delete-other-windows))
     (delete-other-windows))
-  (let* ((bufs (nano/window-split-eligible-buffers))
-         (w2 (ignore-errors (split-window-right)))
+  (let* ((w2 (ignore-errors (split-window-right)))
          (w3 (when w2 (ignore-errors (split-window w2 nil 'right)))))
     (if (and w2 w3)
-        (progn
-          (set-window-buffer w2 (or (nth 1 bufs) "*scratch*"))
-          (set-window-buffer w3 (or (nth 2 bufs) "*scratch*"))
-          (nano/balance-window-widths))
+        (or (nano/window-set-scratch-columns (list (selected-window) w2 w3))
+            (message "SPC w 3: no *scratch* buffer"))
       (message "SPC w 3: frame too narrow to split"))))
 
 (defun nano/window-split-quad-columns (&optional purge)
-  "Four vertical columns, balanced.  With PURGE (C-u), use `delete-other-windows' ignoring window params."
+  "Four vertical columns, balanced, every pane on `*scratch*'.
+With PURGE (C-u), use `delete-other-windows' ignoring window params."
   (interactive "P")
   (if purge
       (let ((ignore-window-parameters t)) (delete-other-windows))
     (delete-other-windows))
-  (let* ((bufs (nano/window-split-eligible-buffers))
-         (w2 (ignore-errors (split-window-right)))
+  (let* ((w2 (ignore-errors (split-window-right)))
          (w3 (when w2 (ignore-errors (split-window w2 nil 'right))))
          (w4 (when w3 (ignore-errors (split-window w3 nil 'right)))))
     (if (and w2 w3 w4)
-        (progn
-          (set-window-buffer w2 (or (nth 1 bufs) "*scratch*"))
-          (set-window-buffer w3 (or (nth 2 bufs) "*scratch*"))
-          (set-window-buffer w4 (or (nth 3 bufs) "*scratch*"))
-          (nano/balance-window-widths))
+        (or (nano/window-set-scratch-columns (list (selected-window) w2 w3 w4))
+            (message "SPC w 4: no *scratch* buffer"))
       (message "SPC w 4: frame too narrow to split"))))
 
 (define-key spacemacs-leader-map (kbd "w 2") 'nano/window-split-double-columns)
