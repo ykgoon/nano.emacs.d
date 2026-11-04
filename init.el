@@ -3751,7 +3751,7 @@ changes still need SPC q r (nano load order)."
 ;; §23  Web  (built-in eww + elfeed/ttrss, SPC a w, lazy)
 ;; ---------------------------------------------------------------------
 ;; Zero startup cost: no `require', straight autoloads only.  First
-;; `SPC a w r' builds elfeed + protocol + goodies.
+;; SPC a r builds elfeed + protocol + goodies.
 ;; Mirrors ~/Dropbox/scripts/spacemacs-private.el:127-254, renamed
 ;; `spacemacs/' -> `nano/'.  Spacemacs elfeed layer enables goodies by
 ;; default (`elfeed-enable-goodies t'): entry layout Tags|Title
@@ -3766,11 +3766,13 @@ changes still need SPC q r (nano load order)."
 (straight-use-package 'elfeed-protocol)
 (straight-use-package 'elfeed-goodies)
 
-(define-key spacemacs-leader-map (kbd "a w e") 'eww)
-(define-key spacemacs-leader-map (kbd "a w r") 'elfeed)
+(define-key spacemacs-leader-map (kbd "a r") 'elfeed)
+(define-key spacemacs-leader-map (kbd "a w w") 'eww)
+(define-key spacemacs-leader-map (kbd "a w r") 'eww-readable)
 (which-key-add-key-based-replacements
-  "SPC a w e" "eww"
-  "SPC a w r" "elfeed")
+  "SPC a r" "elfeed"
+  "SPC a w w" "eww"
+  "SPC a w r" "eww-readable")
 
 ;; 23a0. Evil-collection truce — deterministic nano keys.
 ;;      Collection setup binds theme ids by default keys in elfeed maps
