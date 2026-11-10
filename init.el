@@ -1714,8 +1714,62 @@ outside prog/text never inherit the highlight."
       icomplete-compute-delay 0
       icomplete-show-matches-on-no-input t
       icomplete-hide-common-prefix nil)
-(setq completion-styles '(basic substring partial-completion flex)
-      completion-category-overrides '((file (styles partial-completion))))
+(setq completion-styles '(space-wildcard basic substring partial-completion flex)
+      completion-category-overrides '((file (styles space-wildcard partial-completion))))
+;; §8b  SPACE-wildcard completion style (custom, zero-dep)
+;; Whitespace in the query splits it into tokens; every token must match,
+;; in order, with arbitrary characters (space, hyphen, underscore, dot...)
+;; allowed between tokens.  Built on the same PCM engine as partial-
+;; completion, so file-name handling is inherited (`completion-boundaries'
+;; keeps the directory part literal; the file try-filter applies).
+;; Example: "lorem dolor" matches both "lorem ipsum dolor" and
+;; "lorem-ipsum-dolor.txt"; "ut dolor" matches neither.  Single-token
+;; input behaves exactly like plain prefix completion.
+(defun nano/space-wildcard--tokens-pattern (s)
+  "Turn whitespace-separated S into a PCM pattern with `star' joins."
+  (let ((tokens (split-string s "[ \t\n]+" t)))
+    (if (<= (length tokens) 1)
+        (append tokens (list 'point))
+      (let ((pat (list (car tokens))))
+        (dolist (tok (cdr tokens))
+          (setq pat (append pat (list 'star tok))))
+        (append pat (list 'point))))))
+
+(defun nano/space-wildcard--all (string table pred point)
+  "Compute (ALL PATTERN PREFIX SUFFIX CARBOUNDS) for SPACE-wildcard."
+  (let* ((beforepoint (substring string 0 point))
+         (afterpoint (substring string point))
+         (bounds (completion-boundaries beforepoint table pred afterpoint))
+         (suffix (substring afterpoint (cdr bounds)))
+         (prefix (substring beforepoint 0 (car bounds)))
+         (pattern (append '(prefix)
+                          (nano/space-wildcard--tokens-pattern
+                           (substring beforepoint (car bounds)))))
+         (all (completion-pcm--all-completions prefix pattern table pred)))
+    (list all pattern prefix suffix (car bounds))))
+
+(defun nano/space-wildcard-try-completion (string table pred point)
+  (pcase-let ((`(,all ,pattern ,prefix ,suffix ,_cb)
+               (nano/space-wildcard--all string table pred point)))
+    (when minibuffer-completing-file-name
+      (setq all (completion-pcm--filename-try-filter all)))
+    (completion-pcm--merge-try pattern all prefix suffix)))
+
+(defun nano/space-wildcard-all-completions (string table pred point)
+  (pcase-let ((`(,all ,pattern ,prefix ,_suffix ,_cb)
+               (nano/space-wildcard--all string table pred point)))
+    (when all
+      (nconc (completion-pcm--hilit-commonality pattern all)
+             (length prefix)))))
+
+(add-to-list 'completion-styles-alist
+             '(space-wildcard
+               nano/space-wildcard-try-completion
+               nano/space-wildcard-all-completions
+               "SPACE-wildcard completion.
+Whitespace in the input splits it into tokens; all tokens must match,
+in order, separated by arbitrary characters (\"lorem dolor\" matches
+\"lorem ipsum dolor\" and \"lorem-ipsum-dolor.txt\")."))
 (setq enable-recursive-minibuffers t
       completion-cycle-threshold 3)
 ;; History: recentf backs SPC f r (bound in §5, mode was off);
@@ -1730,6 +1784,13 @@ outside prog/text never inherit the highlight."
 ;; C-n/C-p + arrows come free with icomplete-vertical-mode; add C-j/C-k
 ;; for evil-friendly navigation.  Displaced defaults preserved on C-M-:
 ;; C-j was `icomplete-force-complete-and-exit', C-k was `icomplete-fido-kill'.
+;; SPC must type a literal space in completion minibuffers: default binding
+;; is `minibuffer-complete-word', which hijacks multi-token queries like
+;; "lorem dolor" (SPACE becomes word-completion instead of an input char).
+;; With a literal space, `partial-completion' (§8 styles above) already
+;; treats it as an in-order wildcard: "lorem dolor" -> "lorem ipsum dolor".
+(define-key minibuffer-local-completion-map (kbd "SPC") 'self-insert-command)
+(define-key minibuffer-local-filename-completion-map (kbd "SPC") 'self-insert-command)
 (define-key icomplete-minibuffer-map (kbd "C-j") 'icomplete-forward-completions)
 (define-key icomplete-minibuffer-map (kbd "C-k") 'icomplete-backward-completions)
 (define-key icomplete-minibuffer-map (kbd "C-M-j") 'icomplete-force-complete-and-exit)
