@@ -36,7 +36,7 @@
 ;;   §24  Select  (expand-region, SPC v, lazy)
 ;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
 ;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
-;;   §27  OpenCode  (codeberg/sczi, SPC a c, lazy)
+;;   §27  OpenCode v2  (jdormit/emacs-opencode, SPC a c, lazy)
 ;;   §28  Indentation  (global 2 spaces, Python 4)
 ;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
 ;; =====================================================================
@@ -670,9 +670,9 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
 
 ;; 6b. Modeline sections — Spacemacs blocks, bottom bar only
 ;;     Layout: [N] [E] [RO/RW/**/>< /@host] filename (detail) ... [proc|sel|position] <workspace> %p
-;;     `proc' = buffer-local `mode-line-process' (opencode session
-;;     status: agent/model/context%/⏳🚀), rendered far right only in
-;;     buffers that set it (nano/compose drops that standard slot).
+;;     `proc' = buffer-local `mode-line-process' (a (:eval ...) status
+;;     template set by packages), rendered far right only in buffers
+;;     that set it (nano/compose drops that standard slot).
 ;;     Redefines `nano-modeline-compose' (same signature, so every mode
 ;;     benefits) instead of patching nano source.  Single auto-named tab
 ;;     tracks the buffer name, which used to render `<init.el> ... init.el'
@@ -833,8 +833,8 @@ which duplicated the filename in the modeline."
   "Return scroll percent string for current buffer/window."
   (format-mode-line "%p"))
 
-;; Render `mode-line-process' (e.g. opencode session status, a
-;; (:eval ...) template set by packages) to a string.  Hand-evaluated:
+;; Render `mode-line-process' (a (:eval ...) status template set by
+;; packages) to a string.  Hand-evaluated:
 ;; `format-mode-line' silently DROPS :eval constructs, so standard
 ;; packages using `mode-line-process' would vanish from the nano
 ;; modeline.  Mirrors redisplay semantics: dynamic eval, errors → nil.
@@ -945,21 +945,14 @@ arrows (separator XPMs are GUI-only)."
            (secondary-base (or sel secondary))
            (secondary-eff (if (or sel (>= ww nano/modeline-truncate-secondary-width))
                               secondary-base ""))
-            ;; opencode session block: buffer-local `mode-line-process'
-            ;; holds (:eval (opencode--session-status-indicator)) in
-            ;; session buffers (agent/model/context%/⏳🚀).  Rendered far
-            ;; right, mirroring upstream.  Nil in every other buffer,
-            ;; so this is a no-op there.  Guarded: skip funcall unless set.
-            ;; Skipped when §27c header-line is active (session + control
-            ;; buffers show full rich line on top; modeline keeps space).
-            (proc-raw (when (and mode-line-process
-                                (not (and (fboundp 'nano/opencode-header-active-p)
-                                          (nano/opencode-header-active-p))))
-                        (nano/modeline--render-process)))
-            ;; Hand-rendered value may be any type; only strings display.
-            ;; Literal % doubled: :eval output is %-expanded once, so a
-            ;; single trailing % in "NN%" (or session "42%") gets eaten.
-            (proc (when (stringp proc-raw) (string-replace "%" "%%" proc-raw)))
+           ;; Package-set `mode-line-process' block (a (:eval ...)
+           ;; status template).  Nil in most buffers, so a no-op there.
+           ;; Hand-rendered value may be any type; only strings display.
+           ;; Literal % doubled: :eval output is %-expanded once, so a
+           ;; single trailing % in "NN%" gets eaten.
+           (proc-raw (when mode-line-process
+                       (nano/modeline--render-process)))
+           (proc (when (stringp proc-raw) (string-replace "%" "%%" proc-raw)))
            (active (nano/modeline-selected-p))
            ;; RO/RW both faded grey, ** critical.
            (prefix (let* ((code (cond ((string-suffix-p "RO" status) "RO")
@@ -1223,7 +1216,7 @@ Skips minibuffer and single-window frames (nothing to equalize)."
 ;;     (find-file/SPC b b/org-open) bypasses it — hence alist catch-all
 ;;     PLUS `:around' on `switch-to-buffer' sharing one predicate.
 ;;     Explicit stays explicit: `switch-to-buffer-other-window',
-;;     `display-buffer-in-direction' (elfeed §23a2, opencode splits),
+;;     `display-buffer-in-direction' (elfeed §23a2),
 ;;     dedicated/side windows bypass.  Single window or scratch hidden
 ;;     → open in place.  Elfeed search/show untouched both as origin
 ;;     and as target buffer.
@@ -4312,366 +4305,166 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 
 
 ;; ---------------------------------------------------------------------
-;; §27  OpenCode  (codeberg/sczi, SPC a c, lazy)
+;; §27  OpenCode v2  (jdormit/emacs-opencode, SPC a c, lazy)
 ;; ---------------------------------------------------------------------
-;; Emacs UI for the opencode AI agent (https://opencode.ai/).  straight
-;; supports :host codeberg (straight.el:3875).  Package-Requires pulls
-;; plz / plz-media-type / plz-event-source from MELPA; magit (§10) and
-;; markdown-mode (§20) already vendored.  Needs `opencode' binary on
-;; PATH (server auto-starts headless on first use).
+;; Emacs client for OpenCode 2 (https://opencode.ai).  Talks to the
+;; shared background service (`opencode service start'): one connection
+;; + SSE event stream for all projects, auto-discovered/authenticated
+;; from `~/.local/state/opencode/service.json'.  Requirements: Emacs
+;; 29+, `opencode' binary on PATH, `request' from MELPA (the repo ships
+;; no Package-Requires header, so it is installed explicitly below) and
+;; `curl' on PATH for SSE streaming.
 ;;
-;; Lazy, zero startup cost: package only autoloads `opencode' itself
-;; (single ;;;###autoload); all other commands lack markers, so this
-;; section declares its own autoloads (§26 animal-spirit pattern),
-;; pointing at the umbrella "opencode" feature which requires all
-;; sub-modules (api/common/sessions/...).  First SPC a c press loads
-;; the package + magit once, then nothing.
+;; Lazy, zero startup cost: no `require'; straight generates autoloads
+;; from the repo's ;;;###autoload cookies, so every bound command
+;; resolves before the package loads.  Exception: `SPC a c m' (mcp
+;; list) shells out locally instead of autoloading — the package's
+;; `opencode-mcp-status' is just `opencode mcp list' via
+;; `async-shell-command', and autoloading it would load the whole
+;; client.  First `SPC a c' press loads the package (plus `request'),
+;; then nothing.
 ;;
-;; Session-buffer commands surface via curated `,' / `SPC m' menus
-;; (§16b infra, opencode-session-mode + opencode-session-control-mode);
-;; package's own keymaps stay intact (C-c C-y yank, C-c C-c cancel,
-;; TAB agent cycle, ...).  `,' is evil-normal/visual/motion only —
-;; insert state untouched so `,` types literally in the comint prompt.
-;; `add-region' errors without an active region.
+;; Parity note vs the old sczi/opencode.el — no equivalent in this
+;; package (verified against the vendored source): idle/last-notified
+;; session jump (old `SPC a c i'/`l'), the Sessions panel and its `,'
+;; map, share/unshare, message delete/revert, yank-code-block and
+;; copy-conversation.  History selection is `opencode-open-session'
+;; only.
 ;;
-;; Session modeline block (agent/model/context%/⏳🚀) rides on the
-;; package's buffer-local `mode-line-process'; §6b compose renders it
-;; far right (stock nano modeline would drop that slot) — except in
-;; session/control buffers where §27c header-line shows the full rich
-;; line instead (agent • model+variant • ctx% • tokens • $cost • MCP •
-;; branch • status; cost/tokens from opencode.db, MCP via API cache).
-;; §6b then skips proc to free modeline space.  Ex: header
-;; `🤖 build • big-pickle • 42% • 182K tok • $0.00 • MCP 1/1 • main • 🚀'.
+;; Session buffers (`opencode-session-mode', text-mode derived, named
+;; `*OpenCode: title*') render the package's own buffer-local
+;; header-line on top: `title [agent] ⠹ … provider/model [variant]
+;; tokens ctx% ($cost)'.  §6b moved nano's bar to `mode-line-format'
+;; (bottom) and nils the default `header-line-format', so the package
+;; header is ADDITIVE in these buffers: top line is the package's,
+;; nano's bottom bar is unaffected.  (Unlike the old §27c, which
+;; replaced the top bar — its branch/MCP segments are gone; MCP list
+;; via `SPC a c m'.)  §6b's proc slot stays empty here: the package
+;; sets no `mode-line-process'.
+;;
+;; Curated `,' / `SPC m' menus ride on §16 infra; the package's own C-c
+;; map (C-c C-c send, C-c C-k interrupt, C-c C-a/-l/-v agent/model/
+;; variant, C-c C-o slash command, C-c C-t reasoning, C-c C-f fork,
+;; C-c C-x compact, TAB agent cycle) stays intact and shows in
+;; which-key.  Point edits: transcript is editable; self-insert/yank/
+;; delete redirect into the input area at the end.
 
+(straight-use-package 'request)
 (straight-use-package
- '(opencode :type git :host codeberg :repo "sczi/opencode.el"))
+ '(emacs-opencode :type git :host github :repo "jdormit/emacs-opencode"))
 
-(dolist (cmd '(opencode-new-session opencode-select-open-session
-               opencode-select-project opencode-select-idle
-               opencode-visit-last-idle opencode-add-buffer-dwim
-               opencode-add-file-dwim opencode-add-region
-               opencode-new-worktree opencode-connect opencode-disconnect
-               opencode-add-file opencode-add-subagent
-               opencode-insert-slash-command opencode-cycle-session-agent
-               opencode-select-model opencode-select-variant
-               opencode-toggle-mcp opencode-yank-code-block
-               opencode-copy-conversation opencode-scroll-to-last-response-start
-               opencode-abort-session opencode-respond-permission
-               opencode-select-session opencode-select-child-session
-               opencode-open-parent opencode-rename-session
-               opencode-kill-session opencode-fork-session
-               opencode-compact-session opencode-share-session
-               opencode-unshare-session opencode-unshare-all-sessions
-               opencode-delete-message opencode-revert-message
-               opencode-unrevert-all opencode-sessions-redisplay
-               opencode-session-control-toggle-verbose))
-  (autoload cmd "opencode" nil t))
+(defun nano/opencode-mcp-status ()
+  "List OpenCode MCP connections via the CLI, without loading the package.
+Mirrors the package's `opencode-mcp-status' (`opencode mcp list' via
+`async-shell-command').  Honors `opencode-server-command' only when the
+package is already loaded; defaulting to \"opencode\" avoids pulling in
+the whole client for a shell-out."
+  (interactive)
+  (async-shell-command
+   (format "%s mcp list"
+           (executable-find (if (boundp 'opencode-server-command)
+                                opencode-server-command
+                              "opencode")))))
 
-(define-key spacemacs-leader-map (kbd "a c o") 'opencode)
-(define-key spacemacs-leader-map (kbd "a c n") 'opencode-new-session)
-(define-key spacemacs-leader-map (kbd "a c s") 'opencode-select-open-session)
-(define-key spacemacs-leader-map (kbd "a c P") 'opencode-select-project)
-(define-key spacemacs-leader-map (kbd "a c i") 'opencode-select-idle)
-(define-key spacemacs-leader-map (kbd "a c l") 'opencode-visit-last-idle)
-(define-key spacemacs-leader-map (kbd "a c b") 'opencode-add-buffer-dwim)
-(define-key spacemacs-leader-map (kbd "a c f") 'opencode-add-file-dwim)
-(define-key spacemacs-leader-map (kbd "a c r") 'opencode-add-region)
-(define-key spacemacs-leader-map (kbd "a c w") 'opencode-new-worktree)
-(define-key spacemacs-leader-map (kbd "a c C") 'opencode-connect)
+;; 27a. Global commands  (SPC a c).
+;; `opencode' / `opencode-open-session' default to the project root and
+;; prompt only with C-u.  Context commands use the active region, else
+;; the 10 lines around point.
+(define-key spacemacs-leader-map (kbd "a c n") 'opencode)
+(define-key spacemacs-leader-map (kbd "a c o") 'opencode-open-session)
+(define-key spacemacs-leader-map (kbd "a c a") 'opencode-ask)
+(define-key spacemacs-leader-map (kbd "a c A") 'opencode-ask-contextual)
+(define-key spacemacs-leader-map (kbd "a c s") 'opencode-send-to-session)
+(define-key spacemacs-leader-map (kbd "a c S") 'opencode-send-context-to-session)
+(define-key spacemacs-leader-map (kbd "a c m") 'nano/opencode-mcp-status)
 (define-key spacemacs-leader-map (kbd "a c x") 'opencode-disconnect)
+(define-key spacemacs-leader-map (kbd "a c R") 'opencode-restart)
 (which-key-add-key-based-replacements
   "SPC a c" "opencode"
-  "SPC a c o" "open sessions"
   "SPC a c n" "new session"
-  "SPC a c s" "select open session"
-  "SPC a c P" "select project"
-  "SPC a c i" "select idle session"
-  "SPC a c l" "last notified session"
-  "SPC a c b" "add buffer to context"
-  "SPC a c f" "add file to context"
-  "SPC a c r" "add region to context"
-  "SPC a c w" "new worktree session"
-  "SPC a c C" "connect (manual)"
-  "SPC a c x" "disconnect")
+  "SPC a c o" "open session"
+  "SPC a c a" "ask (new session)"
+  "SPC a c A" "ask with context"
+  "SPC a c s" "send to session"
+  "SPC a c S" "send context to session"
+  "SPC a c m" "mcp list"
+  "SPC a c x" "disconnect"
+  "SPC a c R" "restart service")
 
-;; 27b. Curated `,' / `SPC m' menus — session buffer + Sessions panel.
-;; Grouped mnemonics; package's own C-c map stays parallel.  Autoloads
-;; above make every leaf resolvable pre-load.  `,s' session / `,d'
-;; message ops; sh = select from project history (`ss' = open buffers).
+;; 27b. Curated `,' / `SPC m' menu — session buffer.
+;; Groups: s session / a agent / m model / g git (magit).
+;; Leaves are defined once the package is loaded — guaranteed in
+;; `opencode-session-mode' buffers.  Magit leaves (27c) load their
+;; module on first press.  No `c context' group: the package's only
+;; context command (`opencode-send-context-to-session') captures the
+;; snippet in the buffer it is called FROM, then re-prompts for a
+;; directory + session — from a session buffer that means transcript
+;; context and a double prompt.  Use the global `SPC a c S' from a
+;; source buffer instead.
 (nano/declare-major-prefix 'opencode-session-mode "s" "session")
-(nano/declare-major-prefix 'opencode-session-mode "d" "message")
+(nano/declare-major-prefix 'opencode-session-mode "a" "agent")
+(nano/declare-major-prefix 'opencode-session-mode "m" "model")
+(nano/declare-major-prefix 'opencode-session-mode "g" "git")
 (nano/set-leader-keys-for-major-mode 'opencode-session-mode
-                                     "sn" 'opencode-new-session
-                                     "ss" 'opencode-select-open-session
-                                     "sh" 'opencode-select-session
-                                     "si" 'opencode-select-idle
-                                     "sl" 'opencode-visit-last-idle
-                                     "sc" 'opencode-select-child-session
-                                     "sp" 'opencode-open-parent
-                                     "sr" 'opencode-rename-session
-                                     "sk" 'opencode-kill-session
-                                     "sf" 'opencode-fork-session
-                                     "sC" 'opencode-compact-session
-                                     "sx" 'opencode-share-session
-                                     "su" 'opencode-unshare-session
-                                     "sU" 'opencode-unshare-all-sessions
-                                     "dd" 'opencode-delete-message
-                                     "dr" 'opencode-revert-message
-                                     "du" 'opencode-unrevert-all
-                                     "a"  'opencode-cycle-session-agent
-                                     "A"  'opencode-add-subagent
-                                     "m"  'opencode-select-model
-                                     "v"  'opencode-select-variant
-                                     "M"  'opencode-toggle-mcp
-                                     "i"  'opencode-insert-slash-command
-                                     "f"  'opencode-add-file
-                                     "F"  'opencode-add-file-dwim
-                                     "b"  'opencode-add-buffer-dwim
-                                     "r"  'opencode-add-region
-                                     "y"  'opencode-yank-code-block
-                                     "Y"  'opencode-copy-conversation
-                                     "t"  'opencode-scroll-to-last-response-start
-                                     "x"  'opencode-abort-session
-                                     "p"  'opencode-respond-permission)
+                                     "sn" 'opencode
+                                     "so" 'opencode-open-session
+                                     "sr" 'opencode-session-rename
+                                     "sf" 'opencode-session-fork
+                                     "sc" 'opencode-session-compact
+                                     "sp" 'opencode-session-connect-provider
+                                     "aa" 'opencode-session-select-agent
+                                     "an" 'opencode-session-next-agent
+                                     "ap" 'opencode-session-previous-agent
+                                     "ar" 'opencode-session-refresh-agents
+                                     "mm" 'opencode-session-select-model
+                                     "mv" 'opencode-session-select-variant
+                                     "m]" 'opencode-session-next-variant
+                                     "m[" 'opencode-session-previous-variant
+                                     "m0" 'opencode-session-clear-variant
+                                     "go" 'opencode-magit
+                                     "gs" 'opencode-magit-status
+                                     "gd" 'opencode-magit-session-diff
+                                     "gt" 'opencode-magit-turn-diff
+                                     "i"  'opencode-command
+                                     "t"  'opencode-session-toggle-reasoning
+                                     "b"  'opencode-session-background
+                                     "x"  'opencode-session-interrupt)
+;; Reload-safe: the curated map survives `SPC f e r', so the removed
+;; `cs' leaf and `c' prefix must be unbound here or stale keys linger.
+(define-key (nano/major-mode-leader-map 'opencode-session-mode) (kbd "cs") nil)
+(define-key (nano/major-mode-leader-map 'opencode-session-mode) (kbd "c") nil)
+
 (which-key-add-keymap-based-replacements
   (nano/major-mode-leader-map 'opencode-session-mode)
-  "sn" "new session" "ss" "open sessions"
-  "sh" "select session (history)" "si" "select idle"
-  "sl" "last notified idle" "sc" "child session"
-  "sp" "open parent" "sr" "rename"
-  "sk" "kill" "sf" "fork (at point)"
-  "sC" "compact" "sx" "share"
-  "su" "unshare" "sU" "unshare all"
-  "dd" "delete at point" "dr" "revert edits"
-  "du" "unrevert all"
-  "a" "cycle agent" "A" "add subagent"
-  "m" "select model" "v" "select variant"
-  "M" "toggle MCP" "i" "insert slash command"
-  "f" "add file" "F" "add file dwim"
-  "b" "add buffer" "r" "add region"
-  "y" "yank code block" "Y" "copy conversation"
-  "t" "scroll last response" "x" "abort session"
-  "p" "respond permission")
-
-(nano/declare-major-prefix 'opencode-session-control-mode "s" "session")
-(nano/set-leader-keys-for-major-mode 'opencode-session-control-mode
-                                     "r"  'opencode-sessions-redisplay
-                                     "n"  'opencode-new-session
-                                     "M"  'opencode-toggle-mcp
-                                     "U"  'opencode-unshare-all-sessions
-                                     "v"  'opencode-session-control-toggle-verbose
-                                     "ss" 'opencode-select-open-session
-                                     "si" 'opencode-select-idle
-                                     "sl" 'opencode-visit-last-idle)
-(which-key-add-keymap-based-replacements
-  (nano/major-mode-leader-map 'opencode-session-control-mode)
-  "r" "redisplay" "n" "new session"
-  "M" "toggle MCP" "U" "unshare all"
-  "v" "toggle verbose" "ss" "open sessions"
-  "si" "select idle" "sl" "last notified idle")
+  "sn" "new session" "so" "open session"
+  "sr" "rename" "sf" "fork (at point)"
+  "sc" "compact" "sp" "provider sign-in"
+  "aa" "select agent" "an" "next agent"
+  "ap" "previous agent" "ar" "refresh agents"
+  "mm" "select model" "mv" "select variant"
+  "m]" "next variant" "m[" "previous variant"
+  "m0" "clear variant"
+  "go" "changed worktrees" "gs" "magit status"
+  "gd" "session diff" "gt" "turn diff"
+  "i" "slash command" "t" "toggle thinking"
+  "b" "background work" "x" "interrupt")
 
 (defun nano/opencode-setup-major-leader ()
   "Activate curated `,' / `SPC m' map in opencode session buffers."
   (nano/activate-major-leader-locally 'opencode-session-mode))
-(defun nano/opencode-control-setup-major-leader ()
-  "Activate curated `,' / `SPC m' map in the Sessions panel buffer."
-  (nano/activate-major-leader-locally 'opencode-session-control-mode))
 (add-hook 'opencode-session-mode-hook #'nano/opencode-setup-major-leader)
-(add-hook 'opencode-session-control-mode-hook
-          #'nano/opencode-control-setup-major-leader)
 
-;; 27c. Header-line for session + control buffers (modeline space fix).
-;; Modeline proc (§6b) now skips these buffers (see
-;; `nano/opencode-header-active-p'); full rich line lives on top instead:
-;; `⏳/🚀 • agent • model+variant • ctx%% (tokens/limit) • $cost • MCP n • branch'.
-;; Data: agent/model/variant/tokens/status sync in-memory (free);
-;; cost + db tokens from `~/.local/share/opencode/opencode.db' session table
-;; (has cost, tokens_*, agent, model — verified 2026-09-29, e.g. agent
-;; "plan"/"build", model JSON providerID/modelID/variant); MCP status via
-;; `opencode-api-mcps' async cache.  Render path does NO io (cached only);
-;; refresh happens on hooks/advice throttled 5s, so redisplay stays cheap.
-;; Faces: plain string, no extra faces (stay light, single truncated line).
-;; Reload-safe via remove-hook + named advice (remove before add).
-(defun nano/opencode-header-active-p ()
-  "Non-nil when current buffer shows §27c header (proc skipped in modeline)."
-  (and header-line-format
-       (derived-mode-p 'opencode-session-mode 'opencode-session-control-mode)))
+;; 27b2. Session buffers start in insert state (§29 shell/eshell/term
+;; precedent): the point is the editable input area at the end, and the
+;; package's self-insert/yank/delete redirects only fire in insert.
+;; Transcript navigation stays reachable via ESC normal state.
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'opencode-session-mode 'insert))
 
-(defvar nano/opencode-header-db-file
-  (expand-file-name "~/.local/share/opencode/opencode.db")
-  "Opencode SQLite DB holding session cost/tokens (session table).")
-
-(defvar nano/opencode-header-mcps nil
-  "Cached MCP list as (NAME . STATUS) alists.  Refreshed async, never in render.")
-
-(defvar-local nano/opencode-header-cost nil
-  "Cached session cost from DB (float).  Nil until first refresh / on miss.")
-(defvar-local nano/opencode-header-db-tokens nil
-  "Cached total tokens (input+output) from DB as fallback when live count is nil.")
-(defvar-local nano/opencode-header-branch nil
-  "Cached git branch for session directory.")
-(defvar-local nano/opencode-header-dir nil
-  "Session worktree captured at setup; branch lookup runs here (not live default-directory).")
-(defvar-local nano/opencode-header-last-db 0
-  "Float-time of last DB/branch refresh (5s throttle).")
-
-(defun nano/opencode-header-format-tokens (n)
-  "Human short form for token count N (e.g. 181798 -> 182K)."
-  (cond ((null n) "?")
-        ((>= n 1000000) (format "%.1fM" (/ (float n) 1000000)))
-        ((>= n 1000) (format "%.0fK" (/ (float n) 1000)))
-        (t (format "%d" n))))
-
-(defun nano/opencode-header-db-get (session-id)
-  "Query DB for SESSION-ID, return (COST TOK-IN TOK-OUT) or nil.
-Opens read-only (never blocks the opencode daemon); never signals."
-  (when (and session-id (not (string-empty-p session-id))
-             (file-readable-p nano/opencode-header-db-file)
-             (require 'sqlite nil t))
-    (ignore-errors
-      (let ((db (sqlite-open nano/opencode-header-db-file t)))
-        (unwind-protect
-            (car (sqlite-select db "SELECT cost, tokens_input, tokens_output FROM session WHERE id = ?" (list session-id)))
-          (ignore-errors (sqlite-close db)))))))
-
-(defun nano/opencode-header-refresh-db (&optional force)
-  "Refresh cost/tokens/branch cache from DB (5s throttle unless FORCE).
-Runs in session buffer; no-op elsewhere.  Ends with header redisplay."
-  (when (derived-mode-p 'opencode-session-mode)
-    (let ((now (float-time)))
-      (when (or force (> (- now nano/opencode-header-last-db) 5))
-        (setq nano/opencode-header-last-db now)
-        (when-let ((sid (and (boundp 'opencode-session-id) opencode-session-id)))
-          (when-let ((row (nano/opencode-header-db-get sid)))
-            ;; Nil-preserving: DB miss/NULL hides the segment (no fake $0.00).
-            (setq nano/opencode-header-cost (nth 0 row))
-            (let ((in (nth 1 row)) (out (nth 2 row)))
-              (setq nano/opencode-header-db-tokens
-                    (when (or in out) (+ (or in 0) (or out 0)))))))
-        (setq nano/opencode-header-branch
-              (let ((default-directory (or nano/opencode-header-dir
-                                           default-directory)))
-                (when (fboundp 'magit-get-current-branch)
-                  (ignore-errors (magit-get-current-branch))))))
-      (force-mode-line-update))))
-
-(defun nano/opencode-header-refresh-mcps ()
-  "Async refresh of `nano/opencode-header-mcps' via API; keeps old cache on failure."
-  (when (and (fboundp 'opencode-api-mcps)
-             (bound-and-true-p opencode--event-subscription))
-    (ignore-errors
-      (opencode-api-mcps mcps
-        (setq nano/opencode-header-mcps
-              (mapcar (lambda (m) (cons (car m) (alist-get 'status (cdr m)))) mcps))
-        (dolist (b (buffer-list))
-          (with-current-buffer b
-            (when (derived-mode-p 'opencode-session-mode 'opencode-session-control-mode)
-              (force-mode-line-update))))))))
-
-(defun nano/opencode-header-mcp-string ()
-  "Short MCP summary from cache, or placeholder when unknown."
-  (if (null nano/opencode-header-mcps)
-      "MCP…"
-    (let ((on (seq-count (lambda (m) (string= (cdr m) "connected"))
-                         nano/opencode-header-mcps)))
-      (format "MCP %d/%d" on (length nano/opencode-header-mcps)))))
-
-(defun nano/opencode-header-width ()
-  "Width available for header text: header window width, else 80."
-  (let ((w (get-buffer-window (current-buffer) t)))
-    (if w (window-total-width w) 80)))
-
-(defun nano/opencode-header-line ()
-  "Full rich header for `opencode-session-mode'.  No IO — cached values only."
-  (let* ((agent (when (boundp 'opencode-session-agent)
-                  (and opencode-session-agent
-                       (alist-get 'name opencode-session-agent))))
-         (model-obj (when (fboundp 'opencode--current-model)
-                      (ignore-errors (opencode--current-model))))
-         (model-name (or (alist-get 'name model-obj)
-                         (when (boundp 'opencode-session-agent)
-                           (let-alist opencode-session-agent
-                             (let ((p .model.providerID) (m .model.modelID))
-                               (cond ((and p m) (concat p "/" m))
-                                     (p p) (m m)))))))
-         (variant (when (boundp 'opencode-session-agent)
-                    (alist-get 'variant opencode-session-agent)))
-          (tokens-live (when (boundp 'opencode-session-tokens) opencode-session-tokens))
-          (tokens (or tokens-live nano/opencode-header-db-tokens))
-          (limit (map-nested-elt model-obj '(limit context)))
-          (ctx (when (and tokens-live limit (> limit 0))
-                 (* 100 (/ (float tokens-live) limit))))
-         (cost nano/opencode-header-cost)
-         (status (when (boundp 'opencode-session-status)
-                   (pcase opencode-session-status
-                     ("busy" "⏳") ("idle" "🚀") (_ nil))))
-         (segs (delq nil
-                     (list status
-                           (and agent (format "🤖 %s" agent))
-                           (and model-name (concat model-name
-                                                   (when variant (format " %s" variant))))
-                           ;; Double %%: header-line eats one, displays one.
-                           (and ctx (format "%.0f%%%%" ctx))
-                           (when tokens
-                             (format "%s tok" (nano/opencode-header-format-tokens tokens)))
-                           (when cost (format "$%.2f" cost))
-                           (nano/opencode-header-mcp-string)
-                           nano/opencode-header-branch)))
-          (s (string-join segs " • ")))
-     (truncate-string-to-width s (max 20 (1- (nano/opencode-header-width))) nil nil "…")))
-
-(defun nano/opencode-header-control-line ()
-  "Header for `opencode-session-control-mode': dir + MCP + hint.  No IO."
-  (let ((s (string-join
-            (delq nil (list (abbreviate-file-name (or default-directory "~"))
-                            (nano/opencode-header-mcp-string)
-                            "r redisplay"))
-             " • ")))
-     (truncate-string-to-width s (max 20 (1- (nano/opencode-header-width))) nil nil "…")))
-
-(defun nano/opencode-setup-header ()
-  "Set buffer-local header-line for opencode session buffers."
-  (setq-local nano/opencode-header-dir default-directory)
-  (setq-local header-line-format '(:eval (nano/opencode-header-line)))
-  (nano/opencode-header-refresh-db t)
-  (nano/opencode-header-refresh-mcps))
-
-(defun nano/opencode-control-setup-header ()
-  "Set buffer-local header-line for the Sessions panel."
-  (setq-local header-line-format '(:eval (nano/opencode-header-control-line)))
-  (nano/opencode-header-refresh-mcps))
-
-;; Hooks (reload-safe: remove first).
-(remove-hook 'opencode-session-mode-hook #'nano/opencode-setup-header)
-(remove-hook 'opencode-session-control-mode-hook #'nano/opencode-control-setup-header)
-(add-hook 'opencode-session-mode-hook #'nano/opencode-setup-header)
-(add-hook 'opencode-session-control-mode-hook #'nano/opencode-control-setup-header)
-
-;; Named advice fns: `advice-remove' before `advice-add' keeps
-;; `SPC f e r' reloads from stacking layers (anonymous lambdas dedupe never).
-(defun nano/opencode-header-on-status (&rest _)
-  "Throttled DB refresh after status flip (throttle honored, no FORCE)."
-  (nano/opencode-header-refresh-db))
-(defun nano/opencode-header-on-change (&rest _)
-  "Redisplay header after agent/model/variant switch (cached values only)."
-  (force-mode-line-update))
-(defun nano/opencode-header-on-toggle-mcp (&rest _)
-  "Re-poll MCP cache shortly after a toggle."
-  (run-at-time 1 nil #'nano/opencode-header-refresh-mcps))
-
-;; Refresh on state changes (all guarded, never signal into opencode flows).
-(with-eval-after-load 'opencode-sessions
-  (advice-remove 'opencode-session--set-status #'nano/opencode-header-on-status)
-  (advice-remove 'opencode-cycle-session-agent #'nano/opencode-header-on-change)
-  (advice-remove 'opencode-select-model #'nano/opencode-header-on-change)
-  (advice-remove 'opencode-select-variant #'nano/opencode-header-on-change)
-  (advice-add 'opencode-session--set-status :after #'nano/opencode-header-on-status)
-  (advice-add 'opencode-cycle-session-agent :after #'nano/opencode-header-on-change)
-  (advice-add 'opencode-select-model :after #'nano/opencode-header-on-change)
-  (advice-add 'opencode-select-variant :after #'nano/opencode-header-on-change))
-(with-eval-after-load 'opencode
-  (advice-remove 'opencode-toggle-mcp #'nano/opencode-header-on-toggle-mcp)
-  (advice-add 'opencode-toggle-mcp :after #'nano/opencode-header-on-toggle-mcp))
+;; 27c. Magit review — lazy.  `opencode-magit*' autoloads load
+;; `emacs-opencode-magit' (requires magit) on first `, g' press, which
+;; also binds its commands under C-c C-d in `opencode-session-mode-map'
+;; (overview ret / status s / diff d / session diff a / turn diff t).
 
 ;; ---------------------------------------------------------------------
 ;; §28  Indentation  (global 2 spaces, Python 4)
