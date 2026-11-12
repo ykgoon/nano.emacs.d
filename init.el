@@ -4756,14 +4756,17 @@ the session buffer becomes active stays silent."
 
 (with-eval-after-load 'opencode
   ;; Replace the package notifier with the signal-safe one, so its own
-  ;; toasts (finished, retry, questions) stop erroring without a daemon.
-  ;; Permission requests are dropped here: the advice below already
-  ;; announces them, and the package fires this toast whenever the
-  ;; session buffer is not active, which would double up.
+  ;; toasts (retry, questions, tui) stop erroring without a daemon.
+  ;; Two titles are dropped because 27f and 27g own them: the package
+  ;; fires "OpenCode Permission Request" only when the session buffer is
+  ;; inactive (27f covers every case), and "OpenCode Finished" only when
+  ;; it is inactive too (27g covers every case), so passing them through
+  ;; would notify the user twice for one event.
   (setq opencode-toast-function
         (lambda (properties)
           (let-alist properties
-            (unless (equal .title "OpenCode Permission Request")
+            (unless (member .title '("OpenCode Permission Request"
+                                     "OpenCode Finished"))
               (nano/opencode--notify (or .title "OpenCode")
                                      (or .message "")
                                      (pcase .variant
@@ -4777,6 +4780,78 @@ the session buffer becomes active stays silent."
                  #'nano/opencode--permission-notified-cleanup)
   (advice-add 'opencode--send-permission-response :after
               #'nano/opencode--permission-notified-cleanup))
+
+;; 27g. Desktop notice when a session finishes its turn.
+;; Same blind spot as 27f: the package's "OpenCode Finished" toast is
+;; skipped whenever the session buffer is the active one, so a turn that
+;; ends while the user is looking elsewhere in Emacs (another window,
+;; another frame, another workspace) passes unnoticed.  A `session.idle`
+;; event arrives once per finished turn and carries only the session id,
+;; so the title is resolved through the API the same way the package
+;; does it, and the session's `time.updated' is used as the dedupe key:
+;; it advances with every turn, so a repeated event for the same turn
+;; cannot notify twice.
+;;
+;; Subagent sessions are skipped, matching the package: their parents
+;; aggregate the work and would otherwise cause a burst of notices.  A
+;; session that is idle only because it is waiting on a permission
+;; request is skipped too -- 27f already announced that, and "finished"
+;; would be misleading.
+;;
+;; Example: start a long turn, switch to another buffer; when the turn
+;; ends a notice titled "OpenCode finished" names the session and opens
+;; it on click.
+(defvar nano/opencode--notified-idle nil
+  "Alist of (session-id . time-updated) already announced as finished.
+Bounds the repeat notice for one finished turn.")
+
+(defun nano/opencode--idle-notify (session)
+  "Announce that SESSION finished, once per turn.
+SESSION is the API session object; its title and `time.updated' are
+used for the notice and for deduplication."
+  (let-alist session
+    (when (and .id .title
+               (not (alist-get 'parentID session))
+               (not (nano/opencode--session-waiting-permission-p .id)))
+      ;; Session ids are strings, so every lookup passes `equal'
+      ;; explicitly: `alist-get' compares with `eq' by default, which
+      ;; never matches two distinct strings holding the same id.
+      (unless (equal (alist-get .id nano/opencode--notified-idle
+                                nil nil #'equal)
+                     .time.updated)
+        (setf (alist-get .id nano/opencode--notified-idle
+                         nil nil #'equal)
+              .time.updated)
+        (when (> (length nano/opencode--notified-idle) 50)
+          (setf (nthcdr 50 nano/opencode--notified-idle) nil))
+        (nano/opencode--notify
+         "OpenCode finished"
+         (concat .title "\nThe turn has finished; click to open the session.")
+         'normal
+         .id)))))
+
+(defun nano/opencode--session-waiting-permission-p (session-id)
+  "Return non-nil when SESSION-ID has an unanswered permission request."
+  (when-let* ((buffer (gethash session-id opencode-session-buffers)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (seq-some (lambda (perm)
+                    (equal session-id (plist-get perm :session-id)))
+                  opencode-session-pending-permission)))))
+
+(defun nano/opencode--idle-notify-advice (data)
+  "Notify when DATA reports a finished session turn."
+  (when (equal (alist-get 'type data) "session.idle")
+    (let ((session-id (alist-get 'sessionID (alist-get 'properties data))))
+      (when session-id
+        (opencode-api-session (session-id)
+            session
+          (nano/opencode--idle-notify session))))))
+
+(with-eval-after-load 'opencode
+  (advice-remove 'opencode--handle-message #'nano/opencode--idle-notify-advice)
+  (advice-add 'opencode--handle-message :after
+              #'nano/opencode--idle-notify-advice))
 
 
 ;; ---------------------------------------------------------------------

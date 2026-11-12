@@ -130,6 +130,10 @@ desktop notification fires even if the session buffer is in focus.
 Clicking it raises that session. Without a notification daemon the
 message falls back to the echo area instead of erroring.
 
+A notice is also sent when a turn finishes, naming the session; clicking
+it opens that session. Subagent sessions and turns paused for a
+permission request stay quiet.
+
 If Emacs cannot find `opencode`, check `27a0` added `~/.opencode/bin` to
 `exec-path`; session buffers also need the `markdown` and
 `markdown-inline` Tree-sitter grammars.
