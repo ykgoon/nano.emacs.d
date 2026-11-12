@@ -4781,6 +4781,181 @@ the session buffer becomes active stays silent."
   (advice-add 'opencode--send-permission-response :after
               #'nano/opencode--permission-notified-cleanup))
 
+;; 27h. Never take the minibuffer unless the session buffer has focus.
+;; The package decides with `opencode--buffer-active-p', which requires the
+;; buffer to be the selected window *and* the frame to be focused, but it
+;; only checks that once, when the request arrives.  Two things go wrong:
+;;
+;;   1. If the user switches away before the zero-second timer runs, the
+;;      prompt still fires and the minibuffer takes the keyboard away
+;;      from whatever they are typing in.
+;;   2. If the prompt is dismissed with `C-g', the request stays queued
+;;      but nothing ever offers it again.  Switching back to the session
+;;      buffer does not help, because `window-selection-change-functions'
+;;      only fires when the selected *window* changes -- `C-x b' inside
+;;      one window never runs the package's refocus hook.  The only way
+;;      out was to abort the session and ask again.
+;;
+;; This section gates every prompt path at `opencode-respond-permission',
+;; which is where the arrival timer, the chained prompt after an answer,
+;; the package's refocus hook and the command itself all converge, and
+;; re-arms the prompt from `post-command-hook' when the session buffer
+;; gains focus.  A request that arrives while the user looks elsewhere
+;; sends the 27f desktop notice instead and leaves the prompt queued.
+;;
+;; A prompt fires once per visit: dismissing it with `C-g' while staying
+;; put does not reopen it, but leaving the session buffer and returning
+;; does.
+(defvar nano/opencode--prompted-buffer nil
+  "Buffer that the focus watcher has already accounted for.
+A prompt fires once per visit: dismissing it with \\`C-g' while staying
+put does not reopen it, but leaving the session buffer and coming back
+does, which is what makes a cancelled request recoverable without
+aborting the session.")
+
+(defvar nano/opencode-prompt-requires-frame-focus nil
+  "Non-nil when a prompt also requires Emacs itself to be focused.
+Leave nil to prompt whenever the session buffer is the selected window,
+which is all a terminal or headless Emacs can report.  Set it to t to
+stay quiet while another application has focus.")
+
+(defun nano/opencode--focused-p (buffer)
+  "Return non-nil when BUFFER is the selected window's buffer.
+Unlike `opencode--buffer-active-p' this does not insist on
+`frame-focus-state', which is nil on a headless box."
+  (and (buffer-live-p buffer)
+       (eq buffer (window-buffer (selected-window)))
+       (or (not nano/opencode-prompt-requires-frame-focus)
+           (frame-focus-state (window-frame (selected-window))))))
+
+(defun nano/opencode--prompt-quiet-p ()
+  "Return non-nil when now is a bad moment to open a prompt.
+The transient check uses `transient-active-prefix' rather than the
+`transient--prefix' variable: the variable is deliberately kept as the
+last prefix after an exit, so testing it stays true once a prompt has
+been dismissed and then silently suppresses every later prompt."
+  (or (active-minibuffer-window)
+      (and (fboundp 'transient-active-prefix)
+           (transient-active-prefix))))
+
+(defun nano/opencode--respond-permission-advice (orig)
+  "Prompt for a pending permission only while its session buffer has focus.
+ORIG is `opencode-respond-permission'.  Every path that shows a prompt
+funnels through it -- the arrival timer, the chain that fires after one
+request is answered, the package's refocus hook and the command itself
+-- so gating here covers all of them at once."
+  (cond
+   ;; Nothing queued.  Keep the package's error for a deliberate call and
+   ;; stay silent when a timer or hook ran it.
+   ((null opencode-session-pending-permission)
+    (when (called-interactively-p 'interactive)
+      (funcall orig)))
+   ;; Focus is where it belongs: show the prompt.
+   ((and (not (nano/opencode--prompt-quiet-p))
+         (nano/opencode--focused-p (current-buffer)))
+    (setq nano/opencode--prompted-buffer (current-buffer))
+    (funcall orig))
+   ;; Focus is elsewhere: leave the request pending and let the desktop
+   ;; notice carry it.  Taking the minibuffer here is exactly the
+   ;; interruption this avoids.
+   ((called-interactively-p 'interactive)
+    (message "Permission pending -- switch to the session buffer to respond"))))
+
+(defun nano/opencode--permission-buffer-changed (&rest _)
+  "Forget the last prompted buffer when the selected window's buffer changes.
+This is what tells the focus watcher that the user really went away, so
+a return to the session buffer counts as a new visit and re-offers a
+dismissed request.  Without it the watcher only ever sees the session
+buffer's own commands and cannot tell staying put from coming back.
+
+`window-buffer-change-functions' is used because `post-command-hook' is
+a permanent local in this Emacs, so a global entry there lands in one
+startup buffer and never reaches a session buffer."
+  (unless (eq (current-buffer) nano/opencode--prompted-buffer)
+    (setq nano/opencode--prompted-buffer nil)))
+
+(defun nano/opencode--permission-focus-watch ()
+  "Prompt for a pending permission when a session buffer gains focus.
+Runs from the session buffer's own `post-command-hook': the switch back
+is the only signal available, because `window-selection-change-functions'
+fires only when the selected *window* changes, so \\`C-x b' inside one
+window never ran the package's refocus hook and a dismissed request
+stayed unanswered until the session was aborted.
+
+This has to be buffer-local.  `post-command-hook' is a permanent local
+in this Emacs (evil and eldoc make it so), which means a global
+`add-hook' writes into whichever buffer happens to be current at load
+time and never reaches a session buffer."
+  (let ((buffer (current-buffer)))
+    (unless (eq buffer nano/opencode--prompted-buffer)
+      (setq nano/opencode--prompted-buffer buffer)
+      (when (and opencode-session-pending-permission
+                 (not (nano/opencode--prompt-quiet-p))
+                 (nano/opencode--focused-p buffer))
+        (opencode-respond-permission)))))
+
+(defun nano/opencode--permission-focus-arm ()
+  "Enable the focus watcher in the current session buffer."
+  (add-hook 'post-command-hook #'nano/opencode--permission-focus-watch nil t))
+
+(defun nano/opencode--permission-arm-all ()
+  "Enable the focus watcher in every live session buffer."
+  (maphash (lambda (_id buffer)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (nano/opencode--permission-focus-arm))))
+           opencode-session-buffers))
+
+(defun nano/opencode--permission-notify-gated (permission-id session-id
+                                                            type metadata
+                                                            patterns _always)
+  "Announce a permission request only when its prompt cannot be shown.
+Replaces 27f's unconditional announcement: when the session buffer has
+focus the prompt opens instead, so a desktop notice as well would say the
+same thing twice.  The prompt is raised here explicitly rather than left
+to the package, because the package decides with
+`opencode--buffer-active-p', which also requires `frame-focus-state',
+while 27h accepts a selected window.  On a terminal those disagree, and
+trusting the package would drop the notice and show no prompt either."
+  (let ((buffer (gethash session-id opencode-session-buffers)))
+    (if (and (buffer-live-p buffer)
+             (not (nano/opencode--prompt-quiet-p))
+             (nano/opencode--focused-p buffer))
+        (with-current-buffer buffer
+          (opencode-respond-permission))
+      (nano/opencode--permission-notify-now permission-id session-id
+                                            type metadata patterns))))
+
+(defun nano/opencode--permission-notify-now (permission-id session-id
+                                                         type metadata patterns)
+  "Send the desktop notice for a permission request nobody is watching."
+  (unless (member permission-id nano/opencode--notified-permissions)
+    (push permission-id nano/opencode--notified-permissions)
+    (when (> (length nano/opencode--notified-permissions) 50)
+      (setf (nthcdr 50 nano/opencode--notified-permissions) nil))
+    (let ((request (opencode--permission-format-title type metadata patterns)))
+      (nano/opencode--notify
+       "OpenCode needs permission"
+       (concat request
+               "\nRespond in Emacs: o allow once, a always, n deny")
+       'critical
+       session-id))))
+
+(with-eval-after-load 'opencode
+  (advice-add 'opencode-respond-permission :around
+              #'nano/opencode--respond-permission-advice)
+  (add-hook 'opencode-session-mode-hook
+            #'nano/opencode--permission-focus-arm)
+  (add-hook 'window-buffer-change-functions
+            #'nano/opencode--permission-buffer-changed)
+  (nano/opencode--permission-arm-all)
+  ;; Route the arrival announcement through the gate so a prompt and a
+  ;; notice never both fire for one request.
+  (advice-remove 'opencode--permission-request
+                 #'nano/opencode--permission-notify-advice)
+  (advice-add 'opencode--permission-request :after
+              #'nano/opencode--permission-notify-gated))
+
 ;; 27g. Desktop notice when a session finishes its turn.
 ;; Same blind spot as 27f: the package's "OpenCode Finished" toast is
 ;; skipped whenever the session buffer is the active one, so a turn that

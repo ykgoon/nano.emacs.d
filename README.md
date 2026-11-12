@@ -134,6 +134,14 @@ A notice is also sent when a turn finishes, naming the session; clicking
 it opens that session. Subagent sessions and turns paused for a
 permission request stay quiet.
 
+Permission prompts only ever appear when the session buffer is the one
+you are looking at. If a request arrives while you are in another
+buffer, window, frame or workspace, the minibuffer is left alone and the
+desktop notice tells you instead; the request stays queued and the prompt
+appears the moment you return to the session. Dismissing it with `C-g`
+keeps it queued, so leaving and coming back offers it again — no need to
+abort the session and retry.
+
 If Emacs cannot find `opencode`, check `27a0` added `~/.opencode/bin` to
 `exec-path`; session buffers also need the `markdown` and
 `markdown-inline` Tree-sitter grammars.
