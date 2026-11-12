@@ -19,7 +19,7 @@
 ;;   §7  Theme toggle + persistence + spacemacs-light/nord-dark faces  (SPC t n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
 ;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
-;;   §10 Git  (magit + delta + blame transient, SPC g)
+;;   §10 Git  (magit + delta + blame transient, SPC g; §10c magit in desktop)
 ;;   §11 Project  (built-in project.el, SPC p)
 ;;   §12 Search  (ripgrep via built-in project+xref, SPC s)
 ;;   §13 File sync  (built-in auto-revert, SPC b R fallback)
@@ -535,7 +535,11 @@ Fresh buffer defaults to `org-mode'."
 (setq desktop-dirname (locate-user-emacs-file "var/desktop")
       desktop-path (list desktop-dirname)
       desktop-save t
-      desktop-load-locked-desktop nil
+      ;; nil = refuse to load whenever a lock file exists, so a crash or a
+      ;; `kill' leaves the next start with an empty session ("Desktop file
+      ;; in use; not loaded", nothing restored).  check-pid loads unless the
+      ;; recorded PID is still a live Emacs — stale locks self-heal.
+      desktop-load-locked-desktop 'check-pid
       desktop-restore-eager 10
       desktop-restore-frames t
       desktop-restore-reuses-frames t
@@ -2205,6 +2209,159 @@ need one `q' per buffer before the transient exits."
     (when (boundp 'magit-blame-read-only-mode-map)
       (evil-define-key 'normal magit-blame-read-only-mode-map
         (kbd "RET") 'magit-show-commit))))
+
+;; §10c  Magit buffers in the desktop session  (restart keeps them real)
+;; ---------------------------------------------------------------------
+;; magit buffers visit no file, so `desktop-save' skips them by default.
+;; The frameset then keeps leaves pointing at buffers that are never
+;; recreated, `tab-bar' swaps in a dead " *Old buffer magit: …*"
+;; placeholder, and the workspace's git panes are lost on every restart
+;; (reproduced: 3 tabs → tab 3 collapsed to a single placeholder window).
+;; Two halves of the contract, both required:
+;;   save    — a buffer-local `desktop-save-buffer' (set from
+;;             `magit-mode-hook') that writes the mode, the repository
+;;             directory and the live `magit-buffer-*' locals.
+;;   restore — one `desktop-buffer-mode-handlers' entry per magit mode
+;;             that rebuilds through magit's own *-setup-buffer function,
+;;             so real sections are regenerated.  Poking the locals into
+;;             a fresh buffer and calling `magit-refresh-buffer' is NOT
+;;             enough: the refresh path also needs the mode-specific
+;;             setup (e.g. `magit-log-margin') that only the setup
+;;             function installs.
+;; The rebuilt buffer is renamed to its saved name so the frameset leaf
+;; re-binds to it, and display is suppressed — the frameset restores the
+;; windows itself right after these handlers run.
+(defconst nano/magit-desktop-modes
+  '(magit-status-mode magit-log-mode magit-diff-mode magit-revision-mode
+    magit-reflog-mode magit-refs-mode magit-stash-mode magit-stashes-mode
+    magit-cherry-mode)
+  "Magit modes saved to and restored from the desktop session.")
+
+(defconst nano/magit-desktop-locals
+  '(magit-buffer-revision magit-buffer-revision-oid magit-buffer-blob-oid
+    magit-buffer-file-name magit-buffer-locked-p
+    magit-buffer-diff-range magit-buffer-diff-range-oids
+    magit-buffer-diff-type magit-buffer-diff-typearg magit-buffer-diff-args
+    magit-buffer-diff-files magit-buffer-diff-files-suspended
+    magit-buffer-log-revisions magit-buffer-log-args magit-buffer-log-files
+    magit-buffer-refs-upstream magit-buffer-refs-args
+    magit-buffer-cherry-upstream magit-buffer-cherry-range)
+  "Buffer-local variables that say what a magit buffer is showing.")
+
+(defun nano/magit-desktop-save-buffer (_dirname)
+  "Desktop aux info for a magit buffer, nil in every other mode.
+Called by `desktop-save' through the buffer-local value of
+`desktop-save-buffer' installed by `nano/magit-desktop-enable'."
+  (when (memq major-mode nano/magit-desktop-modes)
+    ;; Only locals that are actually set: unbound ones would error while
+    ;; writing the desktop file, and nil-valued ones are just noise.
+    (list :mode major-mode
+          :dir (or (ignore-errors (magit-toplevel)) default-directory)
+          :locals (let (out)
+                    (dolist (var nano/magit-desktop-locals)
+                      (when (local-variable-p var)
+                        (push (cons var (symbol-value var)) out)))
+                    out))))
+
+(defun nano/magit-desktop--misc (misc var)
+  "Value of VAR in the :locals alist of magit desktop aux MISC."
+  (cdr (assq var (plist-get misc :locals))))
+
+(defun nano/magit-desktop--display-quietly (_buffer)
+  "Display function that leaves the window layout untouched."
+  (selected-window))
+
+(defun nano/magit-desktop-rebuild (mode misc)
+  "Rebuild the magit buffer described by MODE and MISC, and return it.
+MISC is what `nano/magit-desktop-save-buffer' wrote for that buffer.
+Returns nil when the repository directory is gone: the tab-bar then
+shows its own ` *Old buffer …*' placeholder and every other workspace
+still restores."
+  (let* ((dir (expand-file-name (or (plist-get misc :dir) default-directory)))
+         (reachable (file-accessible-directory-p dir))
+         ;; Never bind a nonexistent directory as `default-directory':
+         ;; that signals from the `let*' itself and aborts the restore.
+         (default-directory (if reachable dir default-directory))
+         ;; `magit-display-buffer' would select the new buffer's window
+         ;; and, for some modes, pop a window — that fights the frameset
+         ;; restore that runs right after these handlers.
+         (magit-display-buffer-function #'nano/magit-desktop--display-quietly)
+         (magit-display-buffer-noselect t)
+         (get (lambda (var) (nano/magit-desktop--misc misc var))))
+    (unless reachable
+      (message "Magit desktop: %s is gone, its buffer was not restored" dir))
+    (when reachable
+      (pcase mode
+        ('magit-status-mode
+         (magit-status-setup-buffer dir))
+        ('magit-log-mode
+         (magit-log-setup-buffer
+          (let ((revs (funcall get 'magit-buffer-log-revisions)))
+            (cond ((null revs) '("HEAD"))
+                  ((stringp revs) (list revs))
+                  (revs)))
+          (funcall get 'magit-buffer-log-args)
+          (funcall get 'magit-buffer-log-files)
+          (funcall get 'magit-buffer-locked-p)))
+        ('magit-diff-mode
+         (magit-diff-setup-buffer (funcall get 'magit-buffer-diff-range)
+                                  (funcall get 'magit-buffer-diff-typearg)
+                                  (funcall get 'magit-buffer-diff-args)
+                                  (funcall get 'magit-buffer-diff-files)
+                                  (funcall get 'magit-buffer-diff-type)
+                                  (funcall get 'magit-buffer-locked-p)))
+        ('magit-revision-mode
+         (magit-revision-setup-buffer (funcall get 'magit-buffer-revision)
+                                      (funcall get 'magit-buffer-diff-args)
+                                      (funcall get 'magit-buffer-diff-files)))
+        ('magit-reflog-mode
+         (magit-reflog-setup-buffer (funcall get 'magit-buffer-revision)))
+        ('magit-refs-mode
+         (magit-refs-setup-buffer (funcall get 'magit-buffer-refs-upstream)
+                                  (funcall get 'magit-buffer-refs-args)))
+        ('magit-stash-mode
+         (magit-stash-setup-buffer (funcall get 'magit-buffer-revision)
+                                   (funcall get 'magit-buffer-diff-args)
+                                   (funcall get 'magit-buffer-diff-files)))
+        ('magit-stashes-mode
+         (magit-stashes-setup-buffer))
+        ('magit-cherry-mode
+         (magit-cherry-setup-buffer (funcall get 'magit-buffer-revision)
+                                    (funcall get 'magit-buffer-cherry-upstream)))))))
+
+(defun nano/magit-desktop-handler (_file name misc)
+  "`desktop-buffer-mode-handlers' entry for magit buffers.
+FILE is always nil (magit buffers visit no file); NAME is the saved
+buffer name; MISC is the aux info from `nano/magit-desktop-save-buffer'."
+  (when (and misc (plist-get misc :mode))
+    (let ((buffer (nano/magit-desktop-rebuild (plist-get misc :mode) misc)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          ;; Rename here: `desktop-create-buffer' only renames after the
+          ;; handler returns, and the frameset leaf looks the buffer up
+          ;; by this exact saved name.
+          (unless (equal (buffer-name) name)
+            (rename-buffer name t)))
+        buffer))))
+
+(defun nano/magit-desktop-enable ()
+  "Opt magit buffers into `desktop-save' / `desktop-read'.  Idempotent."
+  (add-hook 'magit-mode-hook
+            (lambda ()
+              (setq-local desktop-save-buffer #'nano/magit-desktop-save-buffer)))
+  (dolist (mode nano/magit-desktop-modes)
+    (add-to-list 'desktop-buffer-mode-handlers
+                 (cons mode #'nano/magit-desktop-handler))))
+
+;; Registered now, NOT from `magit-mode-hook' or `with-eval-after-load
+;; magit': `desktop-read' runs from `after-init-hook' before magit is
+;; loaded, and `desktop-load-file' loads magit only as it reaches the
+;; first magit entry — i.e. after that entry's own handler lookup.  Late
+;; registration silently dropped the first magit buffer of every session
+;; ("… restored, 1 failed to restore"), which was the log pane here.
+;; `desktop' itself is already loaded by §5d.
+(with-eval-after-load 'desktop (nano/magit-desktop-enable))
+
 
 
 ;; ---------------------------------------------------------------------
