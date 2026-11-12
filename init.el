@@ -4574,6 +4574,84 @@ automatically before each new session (27d)."
   (advice-add 'opencode-new-session :before
               #'nano/opencode--refresh-before-new-session))
 
+;; 27e. Cursor follows streamed output.
+;; `comint-move-point-for-output' is nil here, so comint never scrolls a
+;; session window on output (verified: the window point freezes while
+;; the reply grows thousands of chars below it, and the user has to
+;; scroll by hand every turn).  Setting it to 'all is not the answer
+;; either — that yanks the window back to the bottom even after the user
+;; scrolled up to read history.  So a sticky rule samples which windows
+;; are at the tail BEFORE output is inserted, then moves exactly those
+;; windows to the process marker afterwards; a window parked further up
+;; is left alone.  Sampling before the insert matters: afterwards a
+;; parked window's point can sit within the text that just arrived and
+;; look like it is still at the tail.  Only window point moves, never
+;; buffer point, so the session buffer's own point is untouched.
+;; Example: send a long prompt and the view keeps up as the reply
+;; streams; scroll up with the wheel and it stays put, then `C-c C-l'
+;; (or sending the next prompt) re-attaches it.
+(defvar nano/opencode-follow-output t
+  "When non-nil, session windows at the tail follow streamed output.")
+
+(defvar-local nano/opencode--tail-windows nil
+  "Windows that were at the tail before the current output was inserted.
+Set by the pre-output filter and consumed by the post-output one.")
+
+(defun nano/opencode--record-tail-windows (string)
+  "Remember which windows sit at the tail, then pass STRING through.
+Sampling here matters: once the text is in the buffer a parked window
+can look like it is at the tail, because its point only lags by the
+chars that just arrived.  A pre-output filter must return the string it
+was given, or comint inserts nothing."
+  (setq nano/opencode--tail-windows
+        (when nano/opencode-follow-output
+          (let ((end (opencode--session-process-position))
+                tail)
+            (dolist (window (get-buffer-window-list (current-buffer) nil t))
+              ;; Slack of one line: the cursor may rest on the newline
+              ;; that terminates the previous block.
+              (when (>= (window-point window) (- end 1))
+                (push window tail)))
+            tail)))
+  string)
+
+(defun nano/opencode-follow-output-after-filter (&rest _)
+  "Pin the windows recorded as being at the tail to the process marker."
+  (when nano/opencode-follow-output
+    (let ((end (opencode--session-process-position)))
+      (dolist (window nano/opencode--tail-windows)
+        (when (and (window-live-p window)
+                   (eq (window-buffer window) (current-buffer)))
+          (set-window-point window end))))
+    (setq nano/opencode--tail-windows nil)))
+
+(defun nano/opencode-scroll-to-prompt ()
+  "Scroll the session window to the newest output and re-attach following."
+  (interactive)
+  (unless (derived-mode-p 'opencode-session-mode)
+    (user-error "Not in an OpenCode session buffer"))
+  (let ((mark (opencode--session-process-position)))
+    (set-window-point (selected-window) mark)
+    (goto-char mark)
+    (recenter -1)))
+
+(defun nano/opencode--install-follow-output ()
+  "Hook the follow-output filters into the session buffer.
+The pre-output filter records tail windows; the post-output filter runs
+after `comint-postoutput-scroll-to-bottom' and moves them.  Each local
+`remove-hook' first keeps `SPC f e r' reloads single-hooked."
+  (dolist (pair '((comint-preoutput-filter-functions
+                   . nano/opencode--record-tail-windows)
+                  (comint-output-filter-functions
+                   . nano/opencode-follow-output-after-filter)))
+    (remove-hook (car pair) (cdr pair) t)
+    (add-hook (car pair) (cdr pair) t)))
+
+(with-eval-after-load 'opencode
+  (add-hook 'opencode-session-mode-hook #'nano/opencode--install-follow-output)
+  (define-key opencode-session-mode-map
+              (kbd "C-c C-l") #'nano/opencode-scroll-to-prompt))
+
 ;; ---------------------------------------------------------------------
 ;; §28  Indentation  (global 2 spaces, Python 4)
 ;; ---------------------------------------------------------------------

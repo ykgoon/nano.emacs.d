@@ -121,6 +121,10 @@ the package default `big-pickle`.
 Refresh the default model by hand after switching models outside Emacs:
 `M-x nano/opencode-refresh-last-model`.
 
+The cursor follows streamed replies. Scroll up to read history and the
+view stays put; `C-c C-l` jumps back to the newest output and resumes
+following.
+
 ## Customize
 
 Add package in `init.el`:
