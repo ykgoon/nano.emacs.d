@@ -22,6 +22,7 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 - State DB: `~/.local/share/opencode/opencode.db` (override root with `XDG_DATA_HOME`). `session.model` + `message.data` hold the model per session/message.
 - Default model (27d): new sessions adopt the model OpenCode last used in **any** session, read read-only from that DB (`nano/opencode-last-used-model`). `M-x nano/opencode-refresh-last-model` refreshes on demand. Without this, new sessions fall back to the package default `opencode/big-pickle` unless a model was picked in Emacs.
 - Cursor follow (27e): `comint-move-point-for-output` is nil, so comint never scrolls session windows; §27e adds a sticky filter pair instead of setting it (setting it to `all` fights the user's scroll-back). Pre-output filter records tail windows, post-output filter pins them. `C-c C-l` re-attaches after scrolling away.
+- Permission notifications (27f): the package only toasts when the session buffer is inactive, so §27f advises `opencode--permission-request` to notify once per permission id regardless of focus. `opencode-toast-function` is replaced with a signal-safe notifier that probes for `org.freedesktop.Notifications` first and degrades to the echo area (devbox has **no** notification daemon, so the stock notifier logs a dbus error on every call).
 
 ## Workflow
 - Add a package: add `(straight-use-package '(pkg :type git :host github :repo "user/pkg"))` + `(require 'pkg)` in `init.el`.

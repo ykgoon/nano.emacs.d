@@ -125,6 +125,15 @@ The cursor follows streamed replies. Scroll up to read history and the
 view stays put; `C-c C-l` jumps back to the newest output and resumes
 following.
 
+When OpenCode asks for permission (allow once / allow always / deny), a
+desktop notification fires even if the session buffer is in focus.
+Clicking it raises that session. Without a notification daemon the
+message falls back to the echo area instead of erroring.
+
+If Emacs cannot find `opencode`, check `27a0` added `~/.opencode/bin` to
+`exec-path`; session buffers also need the `markdown` and
+`markdown-inline` Tree-sitter grammars.
+
 ## Customize
 
 Add package in `init.el`:

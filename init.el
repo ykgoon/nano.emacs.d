@@ -4652,6 +4652,133 @@ after `comint-postoutput-scroll-to-bottom' and moves them.  Each local
   (define-key opencode-session-mode-map
               (kbd "C-c C-l") #'nano/opencode-scroll-to-prompt))
 
+;; 27f. Desktop notification when OpenCode asks for permission.
+;; The package only toasts a permission request when its session buffer
+;; is NOT active (see `opencode--permission-queue-request'), so the
+;; common case -- the user watching the session -- produces no desktop
+;; notification at all, and the transient popup can sit behind another
+;; frame or workspace.  The built-in toast also calls
+;; `notifications-notify' unguarded, so on a box with no notification
+;; daemon on the bus every toast raises a dbus error.
+;;
+;; This section installs a notifier that never signals and degrades to
+;; the echo area, and announces each permission id once even when the
+;; session buffer is active.  Clicking the notification raises Emacs and
+;; the session buffer.  Ids are remembered so the automatic re-prompt
+;; fired when the buffer becomes active does not notify a second time.
+(defvar nano/opencode-notify-timeout 15000
+  "Milliseconds a permission notification stays on screen.")
+
+(defvar nano/opencode--notified-permissions nil
+  "Permission ids already announced, newest first.
+Keeps the active-buffer re-prompt from notifying the same request again.")
+
+(defun nano/opencode--notification-daemon-p ()
+  "Return non-nil when a notification daemon owns the session bus name.
+Probing first keeps `notifications-notify' from logging a dbus error on
+every call, which is what happens on a box with no desktop."
+  (condition-case nil
+      (progn
+        (require 'dbus)
+        (member "org.freedesktop.Notifications"
+                (dbus-call-method :session
+                                  "org.freedesktop.DBus"
+                                  "/org/freedesktop/DBus"
+                                  "org.freedesktop.DBus"
+                                  "ListNames")))
+    (error nil)))
+
+(defun nano/opencode--notify (title body urgency &optional session-id)
+  "Show TITLE and BODY as a desktop notification, never signalling.
+URGENCY is a `notifications-notify' level.  SESSION-ID, when given, is
+raised in Emacs if the notification is clicked.  Falls back to the echo
+area when no notification daemon is present, which is the normal
+situation on a headless box."
+  (let ((shown
+         (and (nano/opencode--notification-daemon-p)
+              (condition-case nil
+                  (progn
+                    (require 'notifications nil t)
+                    (when (fboundp 'notifications-notify)
+                      (notifications-notify
+                       :title title
+                       :body body
+                       :urgency urgency
+                       :timeout nano/opencode-notify-timeout
+                       :app-icon 'none
+                       :actions (when session-id '("default" "Open session"))
+                       :on-action (when session-id
+                                    (lambda (&rest _)
+                                      (nano/opencode--raise-session
+                                       session-id))))))
+                (error nil)))))
+    (unless shown
+      (message "%s -- %s" title body))))
+
+(defun nano/opencode--raise-session (session-id)
+  "Show the buffer for SESSION-ID and give Emacs focus."
+  (when-let* ((buffer (gethash session-id opencode-session-buffers)))
+    (when (buffer-live-p buffer)
+      (select-frame-set-input-focus (selected-frame))
+      (pop-to-buffer buffer))))
+
+(defun nano/opencode--permission-notify (permission-id session-id
+                                                      type metadata patterns)
+  "Notify about the permission request identified by PERMISSION-ID.
+TYPE, METADATA and PATTERNS describe the request; SESSION-ID is where
+the response prompt lives and is raised when the notification is
+clicked.  Each id is announced once, so the re-prompt that fires when
+the session buffer becomes active stays silent."
+  (unless (member permission-id nano/opencode--notified-permissions)
+    (push permission-id nano/opencode--notified-permissions)
+    ;; Bound the memory of ids; far more than any live request set.
+    (when (> (length nano/opencode--notified-permissions) 50)
+      (setf (nthcdr 50 nano/opencode--notified-permissions) nil))
+    (let ((request (opencode--permission-format-title type metadata patterns)))
+      (nano/opencode--notify
+       "OpenCode needs permission"
+       (concat request
+               "\nRespond in Emacs: o allow once, a always, n deny")
+       'critical
+       session-id))))
+
+(defun nano/opencode--permission-notify-advice (permission-id session-id
+                                                              type metadata
+                                                              patterns _always)
+  "Announce a permission request; see `nano/opencode--permission-notify'."
+  (nano/opencode--permission-notify permission-id session-id
+                                    type metadata patterns))
+
+(defun nano/opencode--permission-notified-cleanup (&rest _)
+  "Forget announced ids once nothing is left pending."
+  (unless opencode-session-pending-permission
+    (setq nano/opencode--notified-permissions nil)))
+
+(with-eval-after-load 'opencode
+  ;; Replace the package notifier with the signal-safe one, so its own
+  ;; toasts (finished, retry, questions) stop erroring without a daemon.
+  ;; Permission requests are dropped here: the advice below already
+  ;; announces them, and the package fires this toast whenever the
+  ;; session buffer is not active, which would double up.
+  (setq opencode-toast-function
+        (lambda (properties)
+          (let-alist properties
+            (unless (equal .title "OpenCode Permission Request")
+              (nano/opencode--notify (or .title "OpenCode")
+                                     (or .message "")
+                                     (pcase .variant
+                                       ((or "error" "warning") 'critical)
+                                       (_ 'normal)))))))
+  (advice-remove 'opencode--permission-request
+                 #'nano/opencode--permission-notify-advice)
+  (advice-add 'opencode--permission-request :after
+              #'nano/opencode--permission-notify-advice)
+  (advice-remove 'opencode--send-permission-response
+                 #'nano/opencode--permission-notified-cleanup)
+  (advice-add 'opencode--send-permission-response :after
+              #'nano/opencode--permission-notified-cleanup))
+
+
 ;; ---------------------------------------------------------------------
 ;; §28  Indentation  (global 2 spaces, Python 4)
 ;; ---------------------------------------------------------------------
