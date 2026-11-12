@@ -16,6 +16,12 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 - Edits reload via `SPC f e r` (`nano/reload-init`, §22): re-runs init.el in-place, covers bindings/defuns/setq. Font/boot changes still need restart (`SPC q r`) — §2 vars are set-before-require and `(require 'nano)` is a no-op on reload.
 - Font/theme tweaks must run BEFORE `(require 'nano)` or nano defaults override them.
 
+## OpenCode (§27)
+- CLI must be installed: `curl -fsSL https://opencode.ai/install | bash` (lands in `~/.opencode/bin`). `27a0` adds that dir to `exec-path`/`$PATH`, so GUI Emacs works without a login shell.
+- Tree-sitter grammars `markdown` + `markdown-inline` are required for session buffers; install once with `M-x treesit-install-language-grammar` (built libs land in `~/.emacs.d/tree-sitter/`).
+- State DB: `~/.local/share/opencode/opencode.db` (override root with `XDG_DATA_HOME`). `session.model` + `message.data` hold the model per session/message.
+- Default model (27d): new sessions adopt the model OpenCode last used in **any** session, read read-only from that DB (`nano/opencode-last-used-model`). `M-x nano/opencode-refresh-last-model` refreshes on demand. Without this, new sessions fall back to the package default `opencode/big-pickle` unless a model was picked in Emacs.
+
 ## Workflow
 - Add a package: add `(straight-use-package '(pkg :type git :host github :repo "user/pkg"))` + `(require 'pkg)` in `init.el`.
 - Edited a vendored package under `straight/repos/`? `M-x straight-rebuild-package RET <pkg>`, or `M-x straight-pull-all` to sync upstream.

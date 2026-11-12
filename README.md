@@ -88,6 +88,39 @@ SPC leader (evil normal/visual/motion + `C-SPC` everywhere):
 | `SPC q q` / `SPC q Q` | `save-buffers-kill-terminal` / `kill-emacs` |
 | `SPC s s` | `isearch-forward` |
 
+## OpenCode
+
+Editor client for [OpenCode](https://opencode.ai), `SPC a c` (§27).
+
+```sh
+curl -fsSL https://opencode.ai/install | bash   # CLI -> ~/.opencode/bin
+```
+
+Emacs finds that dir itself (`27a0`), so GUI sessions work without a
+login shell. Session buffers also need the `markdown` and
+`markdown-inline` Tree-sitter grammars:
+
+```elisp
+;; M-x treesit-install-language-grammar RET markdown RET  (twice: also markdown-inline)
+```
+
+New sessions default to the model OpenCode last used in *any* session
+(CLI, TUI, or Emacs), read from `~/.local/share/opencode/opencode.db`
+(§27d). Example: run `opencode run --model opencode/glm-5.3-flash-free "hi"`,
+then `SPC a c n` — the session starts on `glm-5.3-flash-free` instead of
+the package default `big-pickle`.
+
+| Keys | Action |
+|------|--------|
+| `SPC a c n` | new session |
+| `SPC a c o` | open past session |
+| `SPC a c a` / `A` | ask / ask with context |
+| `SPC a c m` | MCP list |
+| `SPC a c x` / `R` | disconnect / restart service |
+
+Refresh the default model by hand after switching models outside Emacs:
+`M-x nano/opencode-refresh-last-model`.
+
 ## Customize
 
 Add package in `init.el`:

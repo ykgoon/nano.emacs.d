@@ -36,7 +36,8 @@
 ;;   §24  Select  (expand-region, SPC v, lazy)
 ;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
 ;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
-;;   §27  OpenCode v2  (jdormit/emacs-opencode, SPC a c, lazy)
+;;   §27  OpenCode v2  (jdormit/emacs-opencode, SPC a c, lazy;
+;;                        default model = OpenCode's last used, 27d)
 ;;   §28  Indentation  (global 2 spaces, Python 4)
 ;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
 ;; =====================================================================
@@ -4331,6 +4332,11 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 ;; copy-conversation.  History selection is `opencode-open-session'
 ;; only.
 ;;
+;; Default model: new sessions inherit the model OpenCode last used in
+;; ANY session, read from OpenCode's own SQLite DB (27d) — not just
+;; models picked in Emacs.  Refresh by hand with
+;; `M-x nano/opencode-refresh-last-model'.
+;;
 ;; Session buffers (`opencode-session-mode', text-mode derived, named
 ;; `*OpenCode: title*') render the package's own buffer-local
 ;; header-line on top: `title [agent] ⠹ … provider/model [variant]
@@ -4352,6 +4358,21 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 (straight-use-package 'request)
 (straight-use-package
  '(emacs-opencode :type git :host github :repo "jdormit/emacs-opencode"))
+
+;; 27a0. Locate the CLI.  The official installer drops the binary in
+;; ~/.opencode/bin, which is on PATH only for login shells; a GUI Emacs
+;; started from a desktop session never sees it, so starting the server
+;; and `SPC a c m' would fail with "opencode: command not found".
+;; Prepended (not replacing) so a system-wide install still wins.
+;; Reload-safe: the check is a no-op once the entry is present.
+(defun nano/opencode-ensure-exec-path ()
+  "Add OpenCode's install dir to `exec-path' and $PATH when present."
+  (let ((dir (expand-file-name "~/.opencode/bin")))
+    (when (and (file-directory-p dir)
+               (not (member dir exec-path)))
+      (setq exec-path (cons dir exec-path))
+      (setenv "PATH" (concat dir path-separator (getenv "PATH"))))))
+(nano/opencode-ensure-exec-path)
 
 (defun nano/opencode-mcp-status ()
   "List OpenCode MCP connections via the CLI, without loading the package.
@@ -4465,6 +4486,93 @@ the whole client for a shell-out."
 ;; `emacs-opencode-magit' (requires magit) on first `, g' press, which
 ;; also binds its commands under C-c C-d in `opencode-session-mode-map'
 ;; (overview ret / status s / diff d / session diff a / turn diff t).
+
+;; 27d. Default model = the model OpenCode used last, any session.
+;; `opencode-last-model' (§27, persisted by savehist) only records models
+;; picked from the Emacs client, so a fresh install keeps the package
+;; default "big-pickle" even when the CLI/TUI has been busy with
+;; something else.  New sessions therefore re-read the model from
+;; OpenCode's own SQLite database, the multi-session source of truth:
+;; the newest `session.model' row (set whenever a session runs; carries
+;; provider + variant) wins, and the newest `message' row with a model
+;; covers sessions whose model column is still empty.  The database is
+;; opened read-only, so a live `opencode serve' is never disturbed.
+;; Scope: model only (providerID/modelID); variants stay per session
+;; because the package stores those in the agent alist, not in
+;; `opencode-last-model'.  Example: run
+;;   opencode run --model opencode/glm-5.3-flash-free "hi"
+;; from a shell, then `SPC a c n'; the new session starts on
+;; opencode/glm-5.3-flash-free instead of big-pickle.
+(defun nano/opencode--data-dir ()
+  "Return OpenCode's data directory, honoring XDG_DATA_HOME."
+  (expand-file-name "opencode"
+                    (or (getenv "XDG_DATA_HOME")
+                        (expand-file-name "~/.local/share"))))
+
+(defun nano/opencode--model-from-session (db)
+  "Return the model alist of DB's most recently updated session, or nil."
+  (when-let* ((rows (sqlite-select
+                     db (concat "select model from session"
+                                " where model is not null and model <> ''"
+                                " order by time_updated desc limit 1")))
+              (parsed (json-parse-string (caar rows) :object-type 'alist))
+              (provider (alist-get 'providerID parsed))
+              (model (alist-get 'id parsed)))
+    `((providerID . ,provider) (modelID . ,model))))
+
+(defun nano/opencode--model-from-message (db)
+  "Return the model alist of DB's newest message that records one, or nil."
+  (when-let* ((rows (sqlite-select
+                     db (concat "select json_extract(data,'$.providerID'),"
+                                " json_extract(data,'$.modelID')"
+                                " from message"
+                                " where json_extract(data,'$.modelID')"
+                                " is not null"
+                                " order by time_created desc limit 1")))
+              (row (car rows))
+              (provider (nth 0 row))
+              (model (nth 1 row)))
+    `((providerID . ,provider) (modelID . ,model))))
+
+(defun nano/opencode-last-used-model ()
+  "Return the model OpenCode used most recently in any session.
+The value matches `opencode-last-model': ((providerID . \"p\")
+(modelID . \"m\")), or nil when the database is absent, unreadable, or
+holds no model yet."
+  (when (require 'sqlite nil t)
+    (let ((file (expand-file-name "opencode.db" (nano/opencode--data-dir))))
+      (when (file-readable-p file)
+        (condition-case nil
+            (let ((db (sqlite-open file t)))
+              (unwind-protect
+                  (or (nano/opencode--model-from-session db)
+                      (nano/opencode--model-from-message db))
+                (sqlite-close db)))
+          (error nil))))))
+
+(defun nano/opencode-refresh-last-model ()
+  "Adopt OpenCode's last used model as the default for new sessions.
+Interactive for use after switching models outside Emacs; also runs
+automatically before each new session (27d)."
+  (interactive)
+  (if-let* ((model (nano/opencode-last-used-model)))
+      (progn
+        (setq opencode-last-model model)
+        (message "OpenCode default model: %s/%s"
+                 (alist-get 'providerID model)
+                 (alist-get 'modelID model)))
+    (message "OpenCode default model unchanged (no model in %s)"
+             (expand-file-name "opencode.db" (nano/opencode--data-dir)))))
+
+(defun nano/opencode--refresh-before-new-session (&rest _)
+  "Set `opencode-last-model' from the database before a new session."
+  (nano/opencode-refresh-last-model))
+
+(with-eval-after-load 'opencode
+  (advice-remove 'opencode-new-session
+                 #'nano/opencode--refresh-before-new-session)
+  (advice-add 'opencode-new-session :before
+              #'nano/opencode--refresh-before-new-session))
 
 ;; ---------------------------------------------------------------------
 ;; §28  Indentation  (global 2 spaces, Python 4)
