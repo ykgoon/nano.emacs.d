@@ -27,6 +27,14 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 
 - Focus-aware permission prompts (27h): the package checks `opencode--buffer-active-p` only when a permission request arrives, so a prompt lands in the minibuffer even if the user has since switched away, and a `C-g`-dismissed request is never offered again. §27h gates `opencode-respond-permission` (all prompt paths converge there), re-arms from the session buffer's own `post-command-hook`, and sends the desktop notice instead when the buffer is not focused. **Two traps:** `post-command-hook` is a permanent local here (evil/eldoc), so a global `add-hook` lands in one startup buffer and never reaches a session buffer — the real detection is a global `window-buffer-change-functions` entry clearing the prompted-buffer latch, because `window-selection-change-functions` only fires when the selected *window* changes (`C-x b` in one window never fired the package's own refocus hook); and `transient--prefix` is deliberately kept after an exit, so a "prompt is up" test on it stays sticky and silences every later prompt — use `transient-active-prefix`.
 
+## Ghostel (§30)
+- `SPC a t g` = `ghostel` (libghostty-vt terminal, `dakra/ghostel` from MELPA via straight). Separate from the §29 builtins; both exist side by side.
+- Native module lives at `var/ghostel/ghostel-module.so` + `ghostel-module.version`, set by `ghostel-module-directory`. Deliberately outside `straight/` — straight replaces package dirs on rebuild, and re-mapping a live `.so` under a running Emacs breaks its mmap.
+- Install/refresh by hand: download `ghostel-module-x86_64-linux.so` from the GitHub release into that dir and write the matching version to `ghostel-module.version`. `M-x ghostel-download-module` does the same in-process; `M-x ghostel-module-compile` needs zig 0.17.x.
+- The loader refuses to map a module whose sidecar version is below `ghostel--minimum-module-version` (Elisp side), so a version bump in the package needs a matching module refresh — symptom is "Module version X on disk is older than required Y".
+- Starts in evil insert state (like §29 shells). Shell integration (OSC 7 directory tracking, OSC 133 prompt nav) is injected for bash/zsh/fish automatically, no rc edits.
+- `evil-ghostel` (same repo, MELPA) is available but not installed; it maps vim operators onto the PTY.
+
 ## Session restore (§5d + §10c)
 - `SPC q q` / `SPC q r` save to `var/desktop/.emacs.desktop`: every tab (workspace) with its name, each tab's window layout, every file buffer, and — since §10c — every magit buffer. `tab-bar` must be on before `desktop-save-mode` reads, else framesets come back without tabs.
 - `desktop-load-locked-desktop` is `'check-pid`, not nil: a lock left by a crash/kill is ignored once that PID is gone, while a live second Emacs still refuses. With nil, one crash silently emptied the next session ("Desktop file in use; not loaded").

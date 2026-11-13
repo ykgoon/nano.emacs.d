@@ -40,6 +40,7 @@
 ;;                        default model = OpenCode's last used, 27d)
 ;;   §28  Indentation  (global 2 spaces, Python 4)
 ;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
+;;   §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
 ;; =====================================================================
 
 
@@ -5260,6 +5261,41 @@ used for the notice and for deduplication."
   "SPC a t t" "term"
   "SPC a t a" "ansi-term"
   "SPC p '" "project eshell")
+
+;; ---------------------------------------------------------------------
+;; §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
+;; ---------------------------------------------------------------------
+;; Second terminal backend next to the §29 builtins: a real VT engine
+;; (libghostty-vt, the one inside Ghostty) as a native Emacs module --
+;; true color, synchronized output, Kitty keyboard/graphics, hyperlinks,
+;; OSC 7/133 shell integration injected for bash/zsh/fish, no rc edit.
+;; Lazy: `ghostel' is autoloaded, so `SPC a t g' costs nothing until
+;; first use; that call loads ghostel.el, which maps the native module.
+;; Native module: pre-built libghostty .so, no zig toolchain needed.
+;; `ghostel-module-directory' points at var/ghostel/ -- deliberately
+;; outside straight's tree.  straight replaces package files on rebuild,
+;; and swapping a mapped .so under a running Emacs corrupts its mmap.
+;; Installed out-of-band: ghostel-module.so plus the
+;; ghostel-module.version sidecar the loader version-checks before
+;; mapping.  `M-x ghostel-download-module' re-fetches when the Elisp
+;; side raises `ghostel--minimum-module-version'; `M-x
+;; ghostel-module-compile' builds from source instead (needs zig 0.17.x).
+;; Evil: starts in insert state like §29 shells -- typing reaches the
+;; PTY, ESC returns to normal state, SPC (C-SPC fallback, §4) works
+;; from there.  `evil-ghostel' (same repo, MELPA) adds vim operators
+;; over the PTY; not installed, add if stock evil keys feel wrong.
+;; Docs: https://dakra.github.io/ghostel/
+(straight-use-package 'ghostel)
+
+(setq ghostel-module-directory
+      (expand-file-name "var/ghostel/" user-emacs-directory))
+
+(with-eval-after-load 'evil
+  (evil-set-initial-state 'ghostel-mode 'insert))
+
+(define-key spacemacs-leader-map (kbd "a t g") 'ghostel)
+(which-key-add-key-based-replacements
+  "SPC a t g" "ghostel")
 
 ;;; init.el ends here
 (custom-set-variables
