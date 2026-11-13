@@ -104,11 +104,10 @@ login shell. Session buffers also need the `markdown` and
 ;; M-x treesit-install-language-grammar RET markdown RET  (twice: also markdown-inline)
 ```
 
-New sessions default to the model OpenCode last used in *any* session
-(CLI, TUI, or Emacs), read from `~/.local/share/opencode/opencode.db`
-(§27d). Example: run `opencode run --model opencode/glm-5.3-flash-free "hi"`,
-then `SPC a c n` — the session starts on `glm-5.3-flash-free` instead of
-the package default `big-pickle`.
+New sessions start on `opencode-go/glm-5.3-flash` (§27d, customize
+`nano/opencode-default-model`).  The model is injected only into
+interactive creation (`SPC a c n` / `a` / `A`); existing sessions are
+never touched, and the batch runner (`opencode run`) is unaffected.
 
 | Keys | Action |
 |------|--------|
@@ -118,29 +117,22 @@ the package default `big-pickle`.
 | `SPC a c m` | MCP list |
 | `SPC a c x` / `R` | disconnect / restart service |
 
-Refresh the default model by hand after switching models outside Emacs:
-`M-x nano/opencode-refresh-last-model`.
+Streamed replies keep the tail in view on their own (the package's
+renderer pins windows that sit at the tail; scroll up to read history
+and it stays put).  `C-c C-l` selects the model, as the package binds it.
 
-The cursor follows streamed replies. Scroll up to read history and the
-view stays put; `C-c C-l` jumps back to the newest output and resumes
-following.
+When OpenCode asks for permission while its session buffer is NOT the
+selected window, the minibuffer is left alone and a dunst notification
+carries the request instead; clicking it (middle click in this dunstrc)
+raises the session and re-opens the prompt.  A prompt fires instead of a
+notification while you are looking at the session.  Each request
+notifies once.  Quitting the prompt with `C-g` denies the request, which
+is the package's own behaviour.
 
-When OpenCode asks for permission (allow once / allow always / deny), a
-desktop notification fires even if the session buffer is in focus.
-Clicking it raises that session. Without a notification daemon the
-message falls back to the echo area instead of erroring.
-
-A notice is also sent when a turn finishes, naming the session; clicking
-it opens that session. Subagent sessions and turns paused for a
-permission request stay quiet.
-
-Permission prompts only ever appear when the session buffer is the one
-you are looking at. If a request arrives while you are in another
-buffer, window, frame or workspace, the minibuffer is left alone and the
-desktop notice tells you instead; the request stays queued and the prompt
-appears the moment you return to the session. Dismissing it with `C-g`
-keeps it queued, so leaving and coming back offers it again — no need to
-abort the session and retry.
+A notice also fires when a turn finishes out of sight (buffer not
+selected, not a subagent, not your own interrupt); a failed turn
+notifies at critical urgency.  Without dunst on the session bus every
+notice degrades to the echo area instead of erroring.
 
 If Emacs cannot find `opencode`, check `27a0` added `~/.opencode/bin` to
 `exec-path`; session buffers also need the `markdown` and
