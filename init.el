@@ -37,7 +37,7 @@
 ;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
 ;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
 ;;   §27  OpenCode v2  (jdormit/emacs-opencode, SPC a c, lazy;
-;;                        default model = OpenCode's last used, 27d)
+;;                        default model = nano/opencode-default-model, 27d)
 ;;   §28  Indentation  (global 2 spaces, Python 4)
 ;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
 ;;   §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
@@ -4471,8 +4471,8 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 ;; + SSE event stream for all projects, auto-discovered/authenticated
 ;; from `~/.local/state/opencode/service.json'.  Requirements: Emacs
 ;; 29+, `opencode' binary on PATH, `request' from MELPA (the repo ships
-;; no Package-Requires header, so it is installed explicitly below) and
-;; `curl' on PATH for SSE streaming.
+;; no Package-Requires header, so it is installed explicitly below; the
+;; client requires it) and `curl' on PATH for SSE streaming.
 ;;
 ;; Lazy, zero startup cost: no `require'; straight generates autoloads
 ;; from the repo's ;;;###autoload cookies, so every bound command
@@ -4490,10 +4490,13 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 ;; copy-conversation.  History selection is `opencode-open-session'
 ;; only.
 ;;
-;; Default model: new sessions inherit the model OpenCode last used in
-;; ANY session, read from OpenCode's own SQLite DB (27d) — not just
-;; models picked in Emacs.  Refresh by hand with
-;; `M-x nano/opencode-refresh-last-model'.
+;; Default model: new sessions start on `nano/opencode-default-model'
+;; (27d), injected into the interactive creation path only.
+;;
+;; §27d–h ride on the v2 API and are wired in ONE
+;; `with-eval-after-load 'emacs-opencode' block below 27h: the package
+;; provides `emacs-opencode', and nothing ever provides a bare `opencode'
+;; feature, so `with-eval-after-load 'opencode' is a dead letter.
 ;;
 ;; Session buffers (`opencode-session-mode', text-mode derived, named
 ;; `*OpenCode: title*') render the package's own buffer-local
@@ -4645,196 +4648,105 @@ the whole client for a shell-out."
 ;; also binds its commands under C-c C-d in `opencode-session-mode-map'
 ;; (overview ret / status s / diff d / session diff a / turn diff t).
 
-;; 27d. Default model = the model OpenCode used last, any session.
-;; `opencode-last-model' (§27, persisted by savehist) only records models
-;; picked from the Emacs client, so a fresh install keeps the package
-;; default "big-pickle" even when the CLI/TUI has been busy with
-;; something else.  New sessions therefore re-read the model from
-;; OpenCode's own SQLite database, the multi-session source of truth:
-;; the newest `session.model' row (set whenever a session runs; carries
-;; provider + variant) wins, and the newest `message' row with a model
-;; covers sessions whose model column is still empty.  The database is
-;; opened read-only, so a live `opencode serve' is never disturbed.
-;; Scope: model only (providerID/modelID); variants stay per session
-;; because the package stores those in the agent alist, not in
-;; `opencode-last-model'.  Example: run
-;;   opencode run --model opencode/glm-5.3-flash-free "hi"
-;; from a shell, then `SPC a c n'; the new session starts on
-;; opencode/glm-5.3-flash-free instead of big-pickle.
-(defun nano/opencode--data-dir ()
-  "Return OpenCode's data directory, honoring XDG_DATA_HOME."
-  (expand-file-name "opencode"
-                    (or (getenv "XDG_DATA_HOME")
-                        (expand-file-name "~/.local/share"))))
+;; 27d. Default model for new sessions = `nano/opencode-default-model'.
+;; `opencode--create-session' is the single funnel for interactive
+;; creation (`SPC a c n', `a', `A'); it passes only `:agent', so the
+;; server picks its own default.  Two advices thread the model through:
+;; `opencode--create-session' let-binds a flag (which keeps the batch
+;; runner `opencode-run' and its `opencode-client-session-create' call
+;; untouched), and `opencode-client-session-create' fills in `:model'
+;; when the caller did not pass one.  The alist keys match the server
+;; API (`providerID' / `id'), and the reply's model flows back through
+;; `opencode-session--update-session' into the session header.
+(defcustom nano/opencode-default-model "opencode-go/glm-5.3-flash"
+  "Model new OpenCode sessions start on, as \"provider/model\".
+Empty or malformed means no injection, and the server default wins."
+  :type 'string
+  :group 'nano)
 
-(defun nano/opencode--model-from-session (db)
-  "Return the model alist of DB's most recently updated session, or nil."
-  (when-let* ((rows (sqlite-select
-                     db (concat "select model from session"
-                                " where model is not null and model <> ''"
-                                " order by time_updated desc limit 1")))
-              (parsed (json-parse-string (caar rows) :object-type 'alist))
-              (provider (alist-get 'providerID parsed))
-              (model (alist-get 'id parsed)))
-    `((providerID . ,provider) (modelID . ,model))))
+(defun nano/opencode--model-ref (spec)
+  "Turn \"provider/model\" SPEC into the model alist the client sends.
+Nil when SPEC is empty or malformed."
+  (and (stringp spec)
+       (string-match "\\`\\([^/]+\\)/\\([^/]+\\)\\'" spec)
+       `((providerID . ,(match-string 1 spec))
+         (id . ,(match-string 2 spec)))))
 
-(defun nano/opencode--model-from-message (db)
-  "Return the model alist of DB's newest message that records one, or nil."
-  (when-let* ((rows (sqlite-select
-                     db (concat "select json_extract(data,'$.providerID'),"
-                                " json_extract(data,'$.modelID')"
-                                " from message"
-                                " where json_extract(data,'$.modelID')"
-                                " is not null"
-                                " order by time_created desc limit 1")))
-              (row (car rows))
-              (provider (nth 0 row))
-              (model (nth 1 row)))
-    `((providerID . ,provider) (modelID . ,model))))
+(defvar nano/opencode--inject-model nil
+  "Model alist to inject into `opencode-client-session-create'.
+Bound only around interactive creation, by 27d's create-session advice.")
 
-(defun nano/opencode-last-used-model ()
-  "Return the model OpenCode used most recently in any session.
-The value matches `opencode-last-model': ((providerID . \"p\")
-(modelID . \"m\")), or nil when the database is absent, unreadable, or
-holds no model yet."
-  (when (require 'sqlite nil t)
-    (let ((file (expand-file-name "opencode.db" (nano/opencode--data-dir))))
-      (when (file-readable-p file)
-        (condition-case nil
-            (let ((db (sqlite-open file t)))
-              (unwind-protect
-                  (or (nano/opencode--model-from-session db)
-                      (nano/opencode--model-from-message db))
-                (sqlite-close db)))
-          (error nil))))))
+(defun nano/opencode--create-session-advice (orig connection on-created)
+  "Bind the 27d model flag around ORIG's session creation.
+ORIG is `opencode--create-session'; CONNECTION and ON-CREATED pass
+through unchanged."
+  (let ((nano/opencode--inject-model
+         (nano/opencode--model-ref nano/opencode-default-model)))
+    (funcall orig connection on-created)))
 
-(defun nano/opencode-refresh-last-model ()
-  "Adopt OpenCode's last used model as the default for new sessions.
-Interactive for use after switching models outside Emacs; also runs
-automatically before each new session (27d)."
-  (interactive)
-  (if-let* ((model (nano/opencode-last-used-model)))
-      (progn
-        (setq opencode-last-model model)
-        (message "OpenCode default model: %s/%s"
-                 (alist-get 'providerID model)
-                 (alist-get 'modelID model)))
-    (message "OpenCode default model unchanged (no model in %s)"
-             (expand-file-name "opencode.db" (nano/opencode--data-dir)))))
+(defun nano/opencode--session-create-advice (orig connection &rest args)
+  "Add 27d's default model to ORIG's create call when absent.
+ORIG is the generic `opencode-client-session-create'; CONNECTION and
+ARGS are its connection and `&key' arguments."
+  (if (and nano/opencode--inject-model
+           (null (plist-get args :model)))
+      (apply orig connection
+             (plist-put (copy-sequence args)
+                        :model nano/opencode--inject-model))
+    (apply orig connection args)))
 
-(defun nano/opencode--refresh-before-new-session (&rest _)
-  "Set `opencode-last-model' from the database before a new session."
-  (nano/opencode-refresh-last-model))
+;; 27e. Cursor following is the package's own job.  The session buffer
+;; is `text-mode' derived (no comint anywhere in this package), and the
+;; renderer keeps tail windows pinned while streaming: it records
+;; `follow-bottom' per window (window end at `point-max' and point past
+;; the input start marker) in
+;; `opencode-session--message-render-window-states' and restores it
+;; after re-render.  Nothing to add; `C-c C-l' stays
+;; `opencode-session-select-model', as the package binds it.
 
-(with-eval-after-load 'opencode
-  (advice-remove 'opencode-new-session
-                 #'nano/opencode--refresh-before-new-session)
-  (advice-add 'opencode-new-session :before
-              #'nano/opencode--refresh-before-new-session))
-
-;; 27e. Cursor follows streamed output.
-;; `comint-move-point-for-output' is nil here, so comint never scrolls a
-;; session window on output (verified: the window point freezes while
-;; the reply grows thousands of chars below it, and the user has to
-;; scroll by hand every turn).  Setting it to 'all is not the answer
-;; either — that yanks the window back to the bottom even after the user
-;; scrolled up to read history.  So a sticky rule samples which windows
-;; are at the tail BEFORE output is inserted, then moves exactly those
-;; windows to the process marker afterwards; a window parked further up
-;; is left alone.  Sampling before the insert matters: afterwards a
-;; parked window's point can sit within the text that just arrived and
-;; look like it is still at the tail.  Only window point moves, never
-;; buffer point, so the session buffer's own point is untouched.
-;; Example: send a long prompt and the view keeps up as the reply
-;; streams; scroll up with the wheel and it stays put, then `C-c C-l'
-;; (or sending the next prompt) re-attaches it.
-(defvar nano/opencode-follow-output t
-  "When non-nil, session windows at the tail follow streamed output.")
-
-(defvar-local nano/opencode--tail-windows nil
-  "Windows that were at the tail before the current output was inserted.
-Set by the pre-output filter and consumed by the post-output one.")
-
-(defun nano/opencode--record-tail-windows (string)
-  "Remember which windows sit at the tail, then pass STRING through.
-Sampling here matters: once the text is in the buffer a parked window
-can look like it is at the tail, because its point only lags by the
-chars that just arrived.  A pre-output filter must return the string it
-was given, or comint inserts nothing."
-  (setq nano/opencode--tail-windows
-        (when nano/opencode-follow-output
-          (let ((end (opencode--session-process-position))
-                tail)
-            (dolist (window (get-buffer-window-list (current-buffer) nil t))
-              ;; Slack of one line: the cursor may rest on the newline
-              ;; that terminates the previous block.
-              (when (>= (window-point window) (- end 1))
-                (push window tail)))
-            tail)))
-  string)
-
-(defun nano/opencode-follow-output-after-filter (&rest _)
-  "Pin the windows recorded as being at the tail to the process marker."
-  (when nano/opencode-follow-output
-    (let ((end (opencode--session-process-position)))
-      (dolist (window nano/opencode--tail-windows)
-        (when (and (window-live-p window)
-                   (eq (window-buffer window) (current-buffer)))
-          (set-window-point window end))))
-    (setq nano/opencode--tail-windows nil)))
-
-(defun nano/opencode-scroll-to-prompt ()
-  "Scroll the session window to the newest output and re-attach following."
-  (interactive)
-  (unless (derived-mode-p 'opencode-session-mode)
-    (user-error "Not in an OpenCode session buffer"))
-  (let ((mark (opencode--session-process-position)))
-    (set-window-point (selected-window) mark)
-    (goto-char mark)
-    (recenter -1)))
-
-(defun nano/opencode--install-follow-output ()
-  "Hook the follow-output filters into the session buffer.
-The pre-output filter records tail windows; the post-output filter runs
-after `comint-postoutput-scroll-to-bottom' and moves them.  Each local
-`remove-hook' first keeps `SPC f e r' reloads single-hooked."
-  (dolist (pair '((comint-preoutput-filter-functions
-                   . nano/opencode--record-tail-windows)
-                  (comint-output-filter-functions
-                   . nano/opencode-follow-output-after-filter)))
-    (remove-hook (car pair) (cdr pair) t)
-    (add-hook (car pair) (cdr pair) t)))
-
-(with-eval-after-load 'opencode
-  (add-hook 'opencode-session-mode-hook #'nano/opencode--install-follow-output)
-  (define-key opencode-session-mode-map
-              (kbd "C-c C-l") #'nano/opencode-scroll-to-prompt))
-
-;; 27f. Desktop notification when OpenCode asks for permission.
-;; The package only toasts a permission request when its session buffer
-;; is NOT active (see `opencode--permission-queue-request'), so the
-;; common case -- the user watching the session -- produces no desktop
-;; notification at all, and the transient popup can sit behind another
-;; frame or workspace.  The built-in toast also calls
-;; `notifications-notify' unguarded, so on a box with no notification
-;; daemon on the bus every toast raises a dbus error.
+;; 27f. Permission gate: prompt in the session buffer, dunst notice
+;; otherwise.  In this package every prompt path funnels through
+;; `opencode-session--handle-permission-asked' -> `--defer-prompt' (a
+;; zero-second timer that runs the prompt thunk inside the target
+;; session buffer) -> `--prompt-permission' (a plain `completing-read').
+;; The timer does not care where the user is looking, so a request
+;; arriving while another buffer is selected used to steal the
+;; minibuffer.  Advising `--prompt-permission' covers the arrival timer,
+;; the re-prompt after reconnect (`--prompt-pending-requests') and our
+;; own re-offer (27h) in one place.
 ;;
-;; This section installs a notifier that never signals and degrades to
-;; the echo area, and announces each permission id once even when the
-;; session buffer is active.  Clicking the notification raises Emacs and
-;; the session buffer.  Ids are remembered so the automatic re-prompt
-;; fired when the buffer becomes active does not notify a second time.
-(defvar nano/opencode-notify-timeout 15000
-  "Milliseconds a permission notification stays on screen.")
+;; While the session buffer is the selected window the prompt opens as
+;; usual and no notification fires.  Otherwise the request is parked in
+;; `nano/opencode--pending' (27h) and dunst carries it; this box runs
+;; dunst, which owns `org.freedesktop.Notifications'.  Clicking the
+;; notification raises the session buffer and re-offers the prompt.  Each
+;; request id notifies once.  Note that quitting the prompt with `C-g'
+;; DENIES the request here (the package replies "reject" on quit); a
+;; request is only recoverable while it is still parked.
+(defcustom nano/opencode-notify-timeout 15000
+  "Milliseconds an OpenCode notification stays on screen."
+  :type 'integer
+  :group 'nano)
 
-(defvar nano/opencode--notified-permissions nil
-  "Permission ids already announced, newest first.
-Keeps the active-buffer re-prompt from notifying the same request again.")
+(defvar nano/opencode--pending (make-hash-table :test #'equal)
+  "Permission requests parked while their session buffer lacked focus.
+Maps request id -> (permission connection state), as passed to
+`opencode-session--prompt-permission'.")
+
+(defvar nano/opencode--notified (make-hash-table :test #'equal)
+  "Permission request ids already announced, to notify each once.
+Cleared once nothing is pending any more (27h).")
+
+(defun nano/opencode--session-buffer (session-id)
+  "Return the live buffer for SESSION-ID, or nil."
+  (when-let* ((buffer (and (stringp session-id)
+                           (gethash session-id opencode-session--buffers))))
+    (and (buffer-live-p buffer) buffer)))
 
 (defun nano/opencode--notification-daemon-p ()
   "Return non-nil when a notification daemon owns the session bus name.
-Probing first keeps `notifications-notify' from logging a dbus error on
-every call, which is what happens on a box with no desktop."
+Probing first keeps `notifications-notify' from signalling on a box
+with no desktop; the echo-area fallback then carries the message."
   (condition-case nil
       (progn
         (require 'dbus)
@@ -4846,12 +4758,19 @@ every call, which is what happens on a box with no desktop."
                                   "ListNames")))
     (error nil)))
 
-(defun nano/opencode--notify (title body urgency &optional session-id)
+(defun nano/opencode--raise-buffer (buffer)
+  "Show live BUFFER in Emacs and give the frame input focus."
+  (when (buffer-live-p buffer)
+    (select-frame-set-input-focus (selected-frame))
+    (pop-to-buffer buffer)
+    buffer))
+
+(defun nano/opencode--notify (title body urgency &optional buffer)
   "Show TITLE and BODY as a desktop notification, never signalling.
-URGENCY is a `notifications-notify' level.  SESSION-ID, when given, is
-raised in Emacs if the notification is clicked.  Falls back to the echo
-area when no notification daemon is present, which is the normal
-situation on a headless box."
+URGENCY is a `notifications-notify' urgency.  BUFFER, when given, is
+raised in Emacs when the notification's default action fires (on this
+box: middle click; see dunstrc's `mouse_middle_click = do_action').
+Falls back to the echo area when dunst is not on the bus."
   (let ((shown
          (and (nano/opencode--notification-daemon-p)
               (condition-case nil
@@ -4863,114 +4782,63 @@ situation on a headless box."
                        :body body
                        :urgency urgency
                        :timeout nano/opencode-notify-timeout
-                       :app-icon 'none
-                       :actions (when session-id '("default" "Open session"))
-                       :on-action (when session-id
+                       :actions (when buffer '("default" "Open session"))
+                       :on-action (when buffer
                                     (lambda (&rest _)
-                                      (nano/opencode--raise-session
-                                       session-id))))))
+                                      (nano/opencode--raise-buffer buffer)
+                                      (nano/opencode--reoffer))))))
                 (error nil)))))
     (unless shown
       (message "%s -- %s" title body))))
 
-(defun nano/opencode--raise-session (session-id)
-  "Show the buffer for SESSION-ID and give Emacs focus."
-  (when-let* ((buffer (gethash session-id opencode-session-buffers)))
-    (when (buffer-live-p buffer)
-      (select-frame-set-input-focus (selected-frame))
-      (pop-to-buffer buffer))))
+(defun nano/opencode--permission-notify (request-id permission)
+  "Announce the permission request REQUEST-ID once, via dunst.
+PERMISSION is the request's alist.  Silent for an id already notified,
+so the 27h re-offer never announces the same request twice."
+  (unless (or (null request-id)
+              (gethash request-id nano/opencode--notified))
+    (puthash request-id t nano/opencode--notified)
+    (nano/opencode--notify
+     "OpenCode needs permission"
+     (concat
+      (opencode-session--permission-prompt-label permission)
+      "\nRespond in Emacs: Allow once / Allow always / Deny")
+     'critical
+     (nano/opencode--session-buffer
+      (alist-get 'sessionID permission)))))
 
-(defun nano/opencode--permission-notify (permission-id session-id
-                                                      type metadata patterns)
-  "Notify about the permission request identified by PERMISSION-ID.
-TYPE, METADATA and PATTERNS describe the request; SESSION-ID is where
-the response prompt lives and is raised when the notification is
-clicked.  Each id is announced once, so the re-prompt that fires when
-the session buffer becomes active stays silent."
-  (unless (member permission-id nano/opencode--notified-permissions)
-    (push permission-id nano/opencode--notified-permissions)
-    ;; Bound the memory of ids; far more than any live request set.
-    (when (> (length nano/opencode--notified-permissions) 50)
-      (setf (nthcdr 50 nano/opencode--notified-permissions) nil))
-    (let ((request (opencode--permission-format-title type metadata patterns)))
-      (nano/opencode--notify
-       "OpenCode needs permission"
-       (concat request
-               "\nRespond in Emacs: o allow once, a always, n deny")
-       'critical
-       session-id))))
+(defun nano/opencode--prompt-permission-advice (orig permission connection state)
+  "Prompt for PERMISSION only when its buffer is the one being read.
+ORIG is `opencode-session--prompt-permission'; PERMISSION, CONNECTION
+and STATE are its arguments.  The deferred prompt thunk runs inside the
+target session buffer, so `current-buffer' is where the prompt would
+appear.  Unfocused arrivals are parked for 27h's re-offer and announced
+through dunst instead of taking the minibuffer."
+  (if (nano/opencode--prompt-wanted-p)
+      (progn
+        (remhash (alist-get 'id permission) nano/opencode--pending)
+        (funcall orig permission connection state))
+    (let ((request-id (alist-get 'id permission)))
+      (when request-id
+        (puthash request-id (list permission connection state)
+                 nano/opencode--pending))
+      (nano/opencode--permission-notify request-id permission))))
 
-(defun nano/opencode--permission-notify-advice (permission-id session-id
-                                                              type metadata
-                                                              patterns _always)
-  "Announce a permission request; see `nano/opencode--permission-notify'."
-  (nano/opencode--permission-notify permission-id session-id
-                                    type metadata patterns))
-
-(defun nano/opencode--permission-notified-cleanup (&rest _)
-  "Forget announced ids once nothing is left pending."
-  (unless opencode-session-pending-permission
-    (setq nano/opencode--notified-permissions nil)))
-
-(with-eval-after-load 'opencode
-  ;; Replace the package notifier with the signal-safe one, so its own
-  ;; toasts (retry, questions, tui) stop erroring without a daemon.
-  ;; Two titles are dropped because 27f and 27g own them: the package
-  ;; fires "OpenCode Permission Request" only when the session buffer is
-  ;; inactive (27f covers every case), and "OpenCode Finished" only when
-  ;; it is inactive too (27g covers every case), so passing them through
-  ;; would notify the user twice for one event.
-  (setq opencode-toast-function
-        (lambda (properties)
-          (let-alist properties
-            (unless (member .title '("OpenCode Permission Request"
-                                     "OpenCode Finished"))
-              (nano/opencode--notify (or .title "OpenCode")
-                                     (or .message "")
-                                     (pcase .variant
-                                       ((or "error" "warning") 'critical)
-                                       (_ 'normal)))))))
-  (advice-remove 'opencode--permission-request
-                 #'nano/opencode--permission-notify-advice)
-  (advice-add 'opencode--permission-request :after
-              #'nano/opencode--permission-notify-advice)
-  (advice-remove 'opencode--send-permission-response
-                 #'nano/opencode--permission-notified-cleanup)
-  (advice-add 'opencode--send-permission-response :after
-              #'nano/opencode--permission-notified-cleanup))
-
-;; 27h. Never take the minibuffer unless the session buffer has focus.
-;; The package decides with `opencode--buffer-active-p', which requires the
-;; buffer to be the selected window *and* the frame to be focused, but it
-;; only checks that once, when the request arrives.  Two things go wrong:
+;; 27h. Re-offer parked permission requests when their buffer gets focus.
+;; When 27f parked a request, the package's own timer has already fired
+;; and will not fire again, so the parked triple has to be offered by
+;; hand.  The session buffer's own buffer-local `post-command-hook' is
+;; the reliable signal: it is a permanent local in this Emacs (evil and
+;; eldoc make it so), so a GLOBAL `add-hook' would write into whichever
+;; buffer is current at load time and never reach a session buffer --
+;; the hook has to be added per buffer from `opencode-session-mode-hook'
+;; (and once for buffers that already exist when init loads).
 ;;
-;;   1. If the user switches away before the zero-second timer runs, the
-;;      prompt still fires and the minibuffer takes the keyboard away
-;;      from whatever they are typing in.
-;;   2. If the prompt is dismissed with `C-g', the request stays queued
-;;      but nothing ever offers it again.  Switching back to the session
-;;      buffer does not help, because `window-selection-change-functions'
-;;      only fires when the selected *window* changes -- `C-x b' inside
-;;      one window never runs the package's refocus hook.  The only way
-;;      out was to abort the session and ask again.
-;;
-;; This section gates every prompt path at `opencode-respond-permission',
-;; which is where the arrival timer, the chained prompt after an answer,
-;; the package's refocus hook and the command itself all converge, and
-;; re-arms the prompt from `post-command-hook' when the session buffer
-;; gains focus.  A request that arrives while the user looks elsewhere
-;; sends the 27f desktop notice instead and leaves the prompt queued.
-;;
-;; A prompt fires once per visit: dismissing it with `C-g' while staying
-;; put does not reopen it, but leaving the session buffer and returning
-;; does.
-(defvar nano/opencode--prompted-buffer nil
-  "Buffer that the focus watcher has already accounted for.
-A prompt fires once per visit: dismissing it with \\`C-g' while staying
-put does not reopen it, but leaving the session buffer and coming back
-does, which is what makes a cancelled request recoverable without
-aborting the session.")
-
+;; One entry per command: a prompt fires once per visit.  Answering it
+;; removes the state through `opencode-session--remove-prompt', which
+;; also drops our parked entry and, once nothing is pending anywhere,
+;; clears the notified ids so a later request can notify again.  Quitting
+;; a re-offered prompt denies the request (package behaviour).
 (defvar nano/opencode-prompt-requires-frame-focus nil
   "Non-nil when a prompt also requires Emacs itself to be focused.
 Leave nil to prompt whenever the session buffer is the selected window,
@@ -4979,8 +4847,8 @@ stay quiet while another application has focus.")
 
 (defun nano/opencode--focused-p (buffer)
   "Return non-nil when BUFFER is the selected window's buffer.
-Unlike `opencode--buffer-active-p' this does not insist on
-`frame-focus-state', which is nil on a headless box."
+Does not insist on `frame-focus-state', which stays nil on a headless
+box; see `nano/opencode-prompt-requires-frame-focus'."
   (and (buffer-live-p buffer)
        (eq buffer (window-buffer (selected-window)))
        (or (not nano/opencode-prompt-requires-frame-focus)
@@ -4996,195 +4864,161 @@ been dismissed and then silently suppresses every later prompt."
       (and (fboundp 'transient-active-prefix)
            (transient-active-prefix))))
 
-(defun nano/opencode--respond-permission-advice (orig)
-  "Prompt for a pending permission only while its session buffer has focus.
-ORIG is `opencode-respond-permission'.  Every path that shows a prompt
-funnels through it -- the arrival timer, the chain that fires after one
-request is answered, the package's refocus hook and the command itself
--- so gating here covers all of them at once."
-  (cond
-   ;; Nothing queued.  Keep the package's error for a deliberate call and
-   ;; stay silent when a timer or hook ran it.
-   ((null opencode-session-pending-permission)
-    (when (called-interactively-p 'interactive)
-      (funcall orig)))
-   ;; Focus is where it belongs: show the prompt.
-   ((and (not (nano/opencode--prompt-quiet-p))
-         (nano/opencode--focused-p (current-buffer)))
-    (setq nano/opencode--prompted-buffer (current-buffer))
-    (funcall orig))
-   ;; Focus is elsewhere: leave the request pending and let the desktop
-   ;; notice carry it.  Taking the minibuffer here is exactly the
-   ;; interruption this avoids.
-   ((called-interactively-p 'interactive)
-    (message "Permission pending -- switch to the session buffer to respond"))))
+(defun nano/opencode--prompt-wanted-p ()
+  "Return non-nil when the current buffer may open a permission prompt.
+The deferred prompt thunk runs inside the target session buffer, so
+`current-buffer' is where the prompt would appear."
+  (and (not (nano/opencode--prompt-quiet-p))
+       (nano/opencode--focused-p (current-buffer))))
 
-(defun nano/opencode--permission-buffer-changed (&rest _)
-  "Forget the last prompted buffer when the selected window's buffer changes.
-This is what tells the focus watcher that the user really went away, so
-a return to the session buffer counts as a new visit and re-offers a
-dismissed request.  Without it the watcher only ever sees the session
-buffer's own commands and cannot tell staying put from coming back.
-
-`window-buffer-change-functions' is used because `post-command-hook' is
-a permanent local in this Emacs, so a global entry there lands in one
-startup buffer and never reaches a session buffer."
-  (unless (eq (current-buffer) nano/opencode--prompted-buffer)
-    (setq nano/opencode--prompted-buffer nil)))
-
-(defun nano/opencode--permission-focus-watch ()
-  "Prompt for a pending permission when a session buffer gains focus.
-Runs from the session buffer's own `post-command-hook': the switch back
-is the only signal available, because `window-selection-change-functions'
-fires only when the selected *window* changes, so \\`C-x b' inside one
-window never ran the package's refocus hook and a dismissed request
-stayed unanswered until the session was aborted.
-
-This has to be buffer-local.  `post-command-hook' is a permanent local
-in this Emacs (evil and eldoc make it so), which means a global
-`add-hook' writes into whichever buffer happens to be current at load
-time and never reaches a session buffer."
-  (let ((buffer (current-buffer)))
-    (unless (eq buffer nano/opencode--prompted-buffer)
-      (setq nano/opencode--prompted-buffer buffer)
-      (when (and opencode-session-pending-permission
-                 (not (nano/opencode--prompt-quiet-p))
-                 (nano/opencode--focused-p buffer))
-        (opencode-respond-permission)))))
+(defun nano/opencode--reoffer ()
+  "Offer one parked permission request, when this buffer may be prompted.
+Called from the session buffer's `post-command-hook' and from the
+notification's click action.  An entry parked for a session WITHOUT a
+buffer (a subagent request, which the package would have shown in any
+live session buffer) is offered here as well, matching that fallback."
+  (unless (zerop (hash-table-count nano/opencode--pending))
+    (when (nano/opencode--prompt-wanted-p)
+      (let* ((session-id (and opencode-session--session
+                              (opencode-session-id opencode-session--session)))
+             (entry (catch 'found
+                      (maphash
+                       (lambda (request-id triple)
+                         (let* ((permission (nth 0 triple))
+                                (perm-session (alist-get 'sessionID
+                                                         permission)))
+                           (when (or (equal perm-session session-id)
+                                     (null (nano/opencode--session-buffer
+                                            perm-session)))
+                             (remhash request-id nano/opencode--pending)
+                             (throw 'found triple))))
+                       nano/opencode--pending)
+                      nil)))
+        (when entry
+          (apply #'opencode-session--prompt-permission entry))))))
 
 (defun nano/opencode--permission-focus-arm ()
-  "Enable the focus watcher in the current session buffer."
-  (add-hook 'post-command-hook #'nano/opencode--permission-focus-watch nil t))
+  "Arm the 27h re-offer in the current session buffer."
+  (add-hook 'post-command-hook #'nano/opencode--reoffer nil t))
 
 (defun nano/opencode--permission-arm-all ()
-  "Enable the focus watcher in every live session buffer."
+  "Arm the 27h re-offer in every live session buffer.
+Covers buffers created before init loaded or across a reload; the mode
+hook handles new ones."
   (maphash (lambda (_id buffer)
              (when (buffer-live-p buffer)
                (with-current-buffer buffer
                  (nano/opencode--permission-focus-arm))))
-           opencode-session-buffers))
+           opencode-session--buffers))
 
-(defun nano/opencode--permission-notify-gated (permission-id session-id
-                                                            type metadata
-                                                            patterns _always)
-  "Announce a permission request only when its prompt cannot be shown.
-Replaces 27f's unconditional announcement: when the session buffer has
-focus the prompt opens instead, so a desktop notice as well would say the
-same thing twice.  The prompt is raised here explicitly rather than left
-to the package, because the package decides with
-`opencode--buffer-active-p', which also requires `frame-focus-state',
-while 27h accepts a selected window.  On a terminal those disagree, and
-trusting the package would drop the notice and show no prompt either."
-  (let ((buffer (gethash session-id opencode-session-buffers)))
-    (if (and (buffer-live-p buffer)
-             (not (nano/opencode--prompt-quiet-p))
-             (nano/opencode--focused-p buffer))
-        (with-current-buffer buffer
-          (opencode-respond-permission))
-      (nano/opencode--permission-notify-now permission-id session-id
-                                            type metadata patterns))))
+(defun nano/opencode--prompt-removed-advice (_state)
+  "Drop 27h bookkeeping when the package forgets a prompt STATE.
+Called after `opencode-session--remove-prompt', i.e. when a request was
+answered here or resolved in another client.  Once no request is parked
+any more, forget the notified ids so a fresh request notifies again."
+  (when (zerop (hash-table-count nano/opencode--pending))
+    (clrhash nano/opencode--notified)))
 
-(defun nano/opencode--permission-notify-now (permission-id session-id
-                                                         type metadata patterns)
-  "Send the desktop notice for a permission request nobody is watching."
-  (unless (member permission-id nano/opencode--notified-permissions)
-    (push permission-id nano/opencode--notified-permissions)
-    (when (> (length nano/opencode--notified-permissions) 50)
-      (setf (nthcdr 50 nano/opencode--notified-permissions) nil))
-    (let ((request (opencode--permission-format-title type metadata patterns)))
-      (nano/opencode--notify
-       "OpenCode needs permission"
-       (concat request
-               "\nRespond in Emacs: o allow once, a always, n deny")
-       'critical
-       session-id))))
+(defun nano/opencode--api-check ()
+  "Warn when a package symbol §27d–h relies on has changed.
+Advice on a missing symbol succeeds silently in Emacs 31 and disables a
+whole section without a trace -- which is exactly what happened to the
+first attempt at 27d–h, written against the deleted v1 API."
+  (dolist (sym '(opencode--create-session
+                 opencode-client-session-create
+                 opencode-session--prompt-permission
+                 opencode-session--remove-prompt
+                 opencode-session--handle-execution-ended
+                 opencode-session--buffer-for-session
+                 opencode-session--permission-prompt-label
+                 opencode-session-id
+                 opencode-session-title
+                 opencode-session-info
+                 opencode-session--event-data))
+    (unless (fboundp sym)
+      (display-warning
+       'nano (format "emacs-opencode API changed: %s missing" sym))))
+  (dolist (var '(opencode-session--buffers
+                 opencode-session--subagent-parents))
+    (unless (boundp var)
+      (display-warning
+       'nano (format "emacs-opencode API changed: %s missing" var)))))
 
-(with-eval-after-load 'opencode
-  (advice-add 'opencode-respond-permission :around
-              #'nano/opencode--respond-permission-advice)
-  (add-hook 'opencode-session-mode-hook
-            #'nano/opencode--permission-focus-arm)
-  (add-hook 'window-buffer-change-functions
-            #'nano/opencode--permission-buffer-changed)
+;; The one wiring point for §27d–h.  `with-eval-after-load 'opencode' is
+;; a dead letter here: the package provides `emacs-opencode', and nothing
+;; ever provides the bare `opencode' feature.
+(with-eval-after-load 'emacs-opencode
+  (nano/opencode--api-check)
+  ;; 27d. Default model for interactive creation only.
+  (advice-remove 'opencode--create-session
+                 #'nano/opencode--create-session-advice)
+  (advice-add 'opencode--create-session :around
+              #'nano/opencode--create-session-advice)
+  (advice-remove 'opencode-client-session-create
+                 #'nano/opencode--session-create-advice)
+  (advice-add 'opencode-client-session-create :around
+              #'nano/opencode--session-create-advice)
+  ;; 27f. Permission gate.
+  (advice-remove 'opencode-session--prompt-permission
+                 #'nano/opencode--prompt-permission-advice)
+  (advice-add 'opencode-session--prompt-permission :around
+              #'nano/opencode--prompt-permission-advice)
+  ;; 27h. Re-offer parked requests.
+  (add-hook 'opencode-session-mode-hook #'nano/opencode--permission-focus-arm)
   (nano/opencode--permission-arm-all)
-  ;; Route the arrival announcement through the gate so a prompt and a
-  ;; notice never both fire for one request.
-  (advice-remove 'opencode--permission-request
-                 #'nano/opencode--permission-notify-advice)
-  (advice-add 'opencode--permission-request :after
-              #'nano/opencode--permission-notify-gated))
+  (advice-remove 'opencode-session--remove-prompt
+                 #'nano/opencode--prompt-removed-advice)
+  (advice-add 'opencode-session--remove-prompt :after
+              #'nano/opencode--prompt-removed-advice)
+  ;; 27g. Finish notice.
+  (advice-remove 'opencode-session--handle-execution-ended
+                 #'nano/opencode--execution-ended-advice)
+  (advice-add 'opencode-session--handle-execution-ended :after
+              #'nano/opencode--execution-ended-advice))
 
-;; 27g. Desktop notice when a session finishes its turn.
-;; Same blind spot as 27f: the package's "OpenCode Finished" toast is
-;; skipped whenever the session buffer is the active one, so a turn that
-;; ends while the user is looking elsewhere in Emacs (another window,
-;; another frame, another workspace) passes unnoticed.  A `session.idle`
-;; event arrives once per finished turn and carries only the session id,
-;; so the title is resolved through the API the same way the package
-;; does it, and the session's `time.updated' is used as the dedupe key:
-;; it advances with every turn, so a repeated event for the same turn
-;; cannot notify twice.
-;;
-;; Subagent sessions are skipped, matching the package: their parents
-;; aggregate the work and would otherwise cause a burst of notices.  A
-;; session that is idle only because it is waiting on a permission
-;; request is skipped too -- 27f already announced that, and "finished"
-;; would be misleading.
-;;
-;; Example: start a long turn, switch to another buffer; when the turn
-;; ends a notice titled "OpenCode finished" names the session and opens
-;; it on click.
-(defvar nano/opencode--notified-idle nil
-  "Alist of (session-id . time-updated) already announced as finished.
-Bounds the repeat notice for one finished turn.")
-
-(defun nano/opencode--idle-notify (session)
-  "Announce that SESSION finished, once per turn.
-SESSION is the API session object; its title and `time.updated' are
-used for the notice and for deduplication."
-  (let-alist session
-    (when (and .id .title
-               (not (alist-get 'parentID session))
-               (not (nano/opencode--session-waiting-permission-p .id)))
-      ;; Session ids are strings, so every lookup passes `equal'
-      ;; explicitly: `alist-get' compares with `eq' by default, which
-      ;; never matches two distinct strings holding the same id.
-      (unless (equal (alist-get .id nano/opencode--notified-idle
-                                nil nil #'equal)
-                     .time.updated)
-        (setf (alist-get .id nano/opencode--notified-idle
-                         nil nil #'equal)
-              .time.updated)
-        (when (> (length nano/opencode--notified-idle) 50)
-          (setf (nthcdr 50 nano/opencode--notified-idle) nil))
+;; 27g. Finish notice when a turn ends out of sight.
+;; The turn boundary in this package is the `session.execution.*' event
+;; family: `opencode-session--handle-execution-ended' runs for
+;; succeeded, failed and interrupted and is reached through the package's
+;; SSE handler registry, so advising it covers every tracked session.
+;; (There is no `session.idle' event and no `opencode--handle-message'
+;; here -- those were the old v1 package's names.)  Only sessions with a
+;; live buffer announce anything: the title comes from that buffer, and
+;; sessions Emacs never opened are none of this UI's business.  Skip
+;; subagents (their parent aggregates; `opencode-session--subagent-parents'
+;; is the registry), skip your own interrupts, and stay quiet while the
+;; session buffer is the selected window -- watching the reply arrive is
+;; the point; dunst is for when it is not.  Clicking opens the session.
+(defun nano/opencode--execution-ended-advice (event data &optional _meta)
+  "Notify when EVENT ends a turn that nobody is watching.
+DATA is the event payload; the session id and the failure status come
+from it.  See 27g's commentary for the skip list."
+  (let* ((payload (opencode-session--event-data data))
+         (session-id (alist-get 'sessionID payload))
+         (buffer (and (stringp session-id)
+                      (opencode-session--buffer-for-session session-id))))
+    (when (and buffer
+               (buffer-live-p buffer)
+               (not (equal event "session.execution.interrupted"))
+               (null (gethash session-id opencode-session--subagent-parents))
+               (not (eq (window-buffer (selected-window)) buffer)))
+      (let* ((failed (equal event "session.execution.failed"))
+             (title (with-current-buffer buffer
+                      (or (and opencode-session--session
+                               (or (opencode-session-title
+                                    opencode-session--session)
+                                   (alist-get 'title
+                                              (opencode-session-info
+                                               opencode-session--session))))
+                          (buffer-name buffer)))))
         (nano/opencode--notify
-         "OpenCode finished"
-         (concat .title "\nThe turn has finished; click to open the session.")
-         'normal
-         .id)))))
-
-(defun nano/opencode--session-waiting-permission-p (session-id)
-  "Return non-nil when SESSION-ID has an unanswered permission request."
-  (when-let* ((buffer (gethash session-id opencode-session-buffers)))
-    (when (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (seq-some (lambda (perm)
-                    (equal session-id (plist-get perm :session-id)))
-                  opencode-session-pending-permission)))))
-
-(defun nano/opencode--idle-notify-advice (data)
-  "Notify when DATA reports a finished session turn."
-  (when (equal (alist-get 'type data) "session.idle")
-    (let ((session-id (alist-get 'sessionID (alist-get 'properties data))))
-      (when session-id
-        (opencode-api-session (session-id)
-            session
-          (nano/opencode--idle-notify session))))))
-
-(with-eval-after-load 'opencode
-  (advice-remove 'opencode--handle-message #'nano/opencode--idle-notify-advice)
-  (advice-add 'opencode--handle-message :after
-              #'nano/opencode--idle-notify-advice))
+         (if failed "OpenCode turn failed" "OpenCode turn finished")
+         (concat title
+                 (if failed
+                     "\nThe turn failed; click to open the session."
+                   "\nThe turn has finished; click to open the session."))
+         (if failed 'critical 'normal)
+         buffer)))))
 
 
 ;; ---------------------------------------------------------------------
