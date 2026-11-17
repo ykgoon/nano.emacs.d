@@ -617,23 +617,75 @@ Desktop conflict skips save, quit proceeds.  Bound to SPC q q."
 ;; recreated — frameset then drops the whole split (single window after
 ;; restart; reproduced: file + *Org Agenda* side-by-side → wins=1).
 ;; Fix: mark agenda buffers saveable + rebuild on read via mode handler
-;; (args FILENAME BUFNAME MISC, returns live buffer). `org-agenda-list'
-;; is autoloaded (built-in org), zero startup cost. Elfeed needs nothing:
-;; it already sets `desktop-save-buffer' and restores its entry.
-(defun nano/desktop-restore-org-agenda (_file _name _misc)
-  "Rebuild agenda buffer for desktop restore.  Returns live buffer."
-  (unless (fboundp 'org-agenda-list)
+;; (args FILENAME BUFNAME MISC, returns live buffer).  Nothing is
+;; required at startup: the handler autoloads org-agenda itself.
+;;
+;; The VIEW KIND is saved with the buffer, not assumed.  The handler used
+;; to call `org-agenda-list' unconditionally, so every restored agenda
+;; came back as the weekly view even when it had been the TODO list —
+;; the `*Org Agenda*' buffer is shared by all org agenda views, so the
+;; buffer name alone says nothing about which one was on screen.
+;; `desktop-save-buffer' may be a function, and its return value is
+;; handed back as MISC on read, so it now records `org-agenda-type'.
+;; Restore then replays the matching command:
+;;   todo -> `org-todo-list'   (what `SPC o a' then `t' gives)
+;;   agenda -> `org-agenda-list' (weekly view)
+;;   anything else (tags/search) and unknown/old desktops -> weekly view,
+;; the previous behaviour, so a desktop written by an older init.el still
+;; restores.
+(defvar-local nano/org-agenda-last-type nil
+  "Last non-nil `org-agenda-type' seen in this buffer.
+A fallback for `nano/org-agenda--current-type' when neither the variable
+nor the buffer text carries the kind.  Buffer-local because several
+agenda buffers can coexist (`org-agenda-sticky').")
+
+(defun nano/org-agenda--current-type ()
+  "Return the view kind of the current agenda buffer.
+`org-agenda-type' is authoritative once a view is generated, but
+`org-agenda-mode-hook' runs from `org-agenda-mode' BEFORE the view is
+inserted, so at hook time it is still nil.  Every agenda line carries
+the kind as an `org-agenda-type' text property, which is what this
+falls back to, and finally to `nano/org-agenda-last-type'."
+  (or (bound-and-true-p org-agenda-type)
+      (get-text-property (point-min) 'org-agenda-type)
+      nano/org-agenda-last-type))
+
+(defun nano/org-agenda-mode--remember-type ()
+  "Record the current view kind in `nano/org-agenda-last-type'.
+Runs from `org-agenda-mode-hook'.  The first run of a fresh buffer sees
+no view yet (nil); later runs, after a rebuild, pick the kind up.  The
+save side therefore re-reads the buffer instead of trusting this alone."
+  (when-let* ((kind (get-text-property (point-min) 'org-agenda-type)))
+    (setq-local nano/org-agenda-last-type kind)))
+
+(defun nano/org-agenda--desktop-save (_dirname)
+  "Return the auxiliary desktop data for this agenda buffer.
+Records the view kind so `nano/desktop-restore-org-agenda' can rebuild
+the same view instead of always the weekly agenda.  Read at save time,
+when the view is definitely on screen."
+  (list (nano/org-agenda--current-type)))
+
+(defun nano/desktop-restore-org-agenda (_file _name misc)
+  "Rebuild the agenda buffer for desktop restore.  Returns live buffer.
+MISC carries the saved view kind (see
+`nano/org-agenda--desktop-save'); `todo' replays `org-todo-list', the
+weekly `agenda' view and anything unknown replay `org-agenda-list'."
+  (unless (fboundp 'org-todo-list)
     (require 'org-agenda))
   (when (fboundp 'nano/org-agenda-refresh-files)
     (nano/org-agenda-refresh-files))
-  (org-agenda-list)
+  (let ((kind (car-safe misc)))
+    (if (eq kind 'todo)
+        (org-todo-list)
+      (org-agenda-list)))
   (get-buffer org-agenda-buffer-name))
 (with-eval-after-load 'desktop
   (add-to-list 'desktop-buffer-mode-handlers
                '(org-agenda-mode . nano/desktop-restore-org-agenda)))
 (with-eval-after-load 'desktop
   (add-hook 'org-agenda-mode-hook
-            (lambda () (setq-local desktop-save-buffer t))))
+            (lambda ()
+              (setq-local desktop-save-buffer #'nano/org-agenda--desktop-save))))
 
 ;; 5e. Help  (SPC h)
 ;; SPC s search bindings live in §12; isearch still on C-s / C-r natively.
@@ -3572,6 +3624,7 @@ files); pass FORCE to rescan unconditionally.  No-op (warn once via
 (with-eval-after-load 'org-agenda
   (with-eval-after-load 'evil
     (evil-set-initial-state 'org-agenda-mode 'motion)))
+(add-hook 'org-agenda-mode-hook #'nano/org-agenda-mode--remember-type)
 (add-hook 'org-agenda-mode-hook
           (lambda ()
             (when (and (bound-and-true-p evil-mode)
