@@ -18,7 +18,7 @@
 ;;   §6  Window management  (winum, header-line, double/triple/quad columns, uniform widths)
 ;;   §7  Theme toggle + persistence + spacemacs-light/nord-dark faces  (SPC t n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
-;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline)
+;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline; §9c quad)
 ;;   §10 Git  (magit + delta + blame transient, SPC g; §10c magit in desktop)
 ;;   §11 Project  (built-in project.el, SPC p)
 ;;   §12 Search  (ripgrep via built-in project+xref, SPC s)
@@ -1875,7 +1875,7 @@ With prefix ARG, pass through to `tab-bar-new-tab'."
                       (propertize (concat "[" s "]") 'face 'warning)
                     s)))
               (nano/workspace--tabs) " | ")
-   "  (1-9 go/new, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q/C-g quit)"))
+   "  (1-9 go/new, n new, ]/[ next/prev, TAB last, l list, b buffer, c code, r rename, x close, q/C-g quit)"))
 
 (defun nano/workspace-select-or-create (n)
   "Switch to workspace N; create trailing workspace when N beyond last.
@@ -1921,9 +1921,10 @@ Spacemacs nth/new parity — tab-bar is gapless, so N past end appends."
          ((eq ev ?\[) (tab-bar-switch-to-prev-tab))
          ((eq ev ?\t) (tab-bar-switch-to-last-tab))
          ((eq ev ?l) (nano/workspace-list-and-switch) (setq done t))
+         ((eq ev ?c) (nano/quad-workspace-create) (setq done t))
          ((eq ev ?b) (call-interactively #'switch-to-buffer) (setq done t))
          ((memq ev (list ?q ?\C-g ?\r ?\e)) (setq done t) (message nil))
-         ((eq ev ??) (message "Keys: 1-9 go/create, n new, ]/[ next/prev, TAB last, l list, b buffer, r rename, x close, q/C-g quit"))
+         ((eq ev ??) (message "Keys: 1-9 go/create, n new, ]/[ next/prev, TAB last, l list, b buffer, c code workspace, r rename, x close, q/C-g quit"))
          (t (message "Unknown workspace key: %s" (key-description (vector ev)))))))))
 
 (define-key spacemacs-leader-map (kbd "l") 'nano/workspace-dispatch)
@@ -1932,6 +1933,120 @@ Spacemacs nth/new parity — tab-bar is gapless, so N past end appends."
 (define-key evil-motion-state-map (kbd "gt") 'tab-bar-switch-to-next-tab)
 (define-key evil-motion-state-map (kbd "gT") 'tab-bar-switch-to-prev-tab)
 
+
+;; 9c. Quad "code" workspace  (SPC l c)
+;; ---------------------------------------------------------------------
+;; One tab, four equal vertical columns, left to right:
+;;   w1 magit status repo A | w2 OpenCode session repo A
+;;   w3 OpenCode session repo B | w4 magit status repo B
+;; Both repos are read up front, so a non-repo answer or a narrow frame
+;; aborts before anything is created and the current layout survives.
+;;
+;; Columns: `split-window-right' three times yields w1..w4 in
+;; `window-list' order with equal widths (§6e keeps them balanced).
+;; `nano/window-split-quad-columns' is deliberately NOT reused — it
+;; puts `*scratch*' in every pane.
+;;
+;; Placement, both halves: magit and the OpenCode client each display
+;; their own buffer (`magit-display-buffer', `pop-to-buffer').  Magit
+;; reuses §10c's quiet display binding.  OpenCode is asynchronous
+;; (service start -> session create -> `opencode-session-open'), so the
+;; window is supplied by `display-buffer-overriding-action' bound
+;; INSIDE the callback: overriding beats `display-buffer-alist', which
+;; stops §6f's scratch routing from parking the session in another pane.
+;; Focus after creation is not meaningful — whichever callback lands
+;; last selects its own column.
+;;
+;; Known limits: magit status buffers are per-repository, so a repo
+;; already shown in another tab shares that same buffer here; and the
+;; session panes are not restored by `SPC q r' (§5d/§10c restore the
+;; tab and its magit buffers only).
+(defun nano/quad-workspace--read-repo (label)
+  "Read a git repository for LABEL, re-prompting when it is not one.
+Completion offers `magit-repository-directories' plus known project
+roots; any path may be typed instead.  Returns a directory name."
+  (require 'magit-repos nil t)
+  (let (root)
+    (while (not root)
+      (let* ((cands (delete-dups
+                     (append
+                      (ignore-errors (mapcar #'car (magit-repos-alist)))
+                      (ignore-errors (project-known-project-roots)))))
+             (pick (completing-read (format "%s: " label) cands nil nil))
+             (dir (if (string-empty-p pick)
+                      (read-directory-name (format "%s: " label) nil t)
+                    (expand-file-name pick))))
+        (setq root (ignore-errors (magit-toplevel dir)))
+        (unless root
+          (message "%s is not inside a git repository" dir))))
+    (file-name-as-directory root)))
+
+(defun nano/quad-workspace--place (window)
+  "Return a `display-buffer' action function that displays into WINDOW."
+  (lambda (buffer _alist)
+    (set-window-buffer window buffer)
+    window))
+
+(defun nano/quad-workspace--magit (directory window)
+  "Show DIRECTORY's magit status in WINDOW without disturbing the layout.
+`magit-status-setup-buffer' always routes through `magit-display-buffer'
+\(magit-mode.el), hence the §10c quiet binding around the call."
+  ;; `require' must come FIRST: magit declares these as special
+  ;; variables in its own `defcustom's, and let-binding one before that
+  ;; makes it lexical, after which magit's `defcustom' signals
+  ;; "Defining as dynamic an already lexical var" — i.e. the very first
+  ;; `SPC l c' of a session would fail.  §10c gets away without this
+  ;; because desktop restore always runs after magit has loaded.
+  (require 'magit)
+  (let ((magit-display-buffer-function #'nano/magit-desktop--display-quietly)
+        (magit-display-buffer-noselect t))
+    (set-window-buffer window (magit-status-setup-buffer directory))))
+
+(defun nano/quad-workspace--opencode (directory window)
+  "Create an OpenCode session for DIRECTORY and show it in WINDOW.
+Goes through the same funnel as `SPC a c n' (`opencode--create-session'),
+so the §27d default model applies."
+  (require 'emacs-opencode)
+  (opencode-run-server
+   directory
+   (lambda (connection)
+     (let ((display-buffer-overriding-action
+            (cons (nano/quad-workspace--place window) nil)))
+       (opencode--create-session
+        connection
+        (lambda (session)
+          (opencode-session-open session connection)))))))
+
+(defun nano/quad-workspace-create ()
+  "New workspace: magit A | opencode A | opencode B | magit B (SPC l c)."
+  (interactive)
+  (let ((a (nano/quad-workspace--read-repo "Repo 1 (left)"))
+        (b (nano/quad-workspace--read-repo "Repo 2 (right)")))
+    (tab-bar-new-tab)
+    (delete-other-windows)
+    (let* ((w1 (selected-window))
+           (w2 (ignore-errors (split-window-right)))
+           (w3 (and w2 (ignore-errors (split-window w2 nil 'right))))
+           (w4 (and w3 (ignore-errors (split-window w3 nil 'right)))))
+      (if (not (and w2 w3 w4))
+          ;; Undo cleanly: drop the panes and the tab this command just
+          ;; created, so a narrow frame leaves the previous workspace as
+          ;; it was instead of stranding an empty one.
+          (progn (delete-other-windows)
+                 (when (> (length (tab-bar-tabs)) 1)
+                   (tab-bar-close-tab))
+                 (message "Quad workspace: frame too narrow for four columns"))
+        (nano/quad-workspace--magit a w1)
+        (nano/quad-workspace--magit b w4)
+        (nano/quad-workspace--opencode a w2)
+        (nano/quad-workspace--opencode b w3)
+        (nano/balance-window-widths)
+        (select-window w2)
+        (tab-bar-rename-tab
+         (format "%s|%s"
+                 (file-name-nondirectory (directory-file-name a))
+                 (file-name-nondirectory (directory-file-name b))))
+        (message "Quad workspace: %s | %s" a b)))))
 
 ;; ---------------------------------------------------------------------
 ;; §10  Git  (magit + delta, SPC g)

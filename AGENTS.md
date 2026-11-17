@@ -16,6 +16,13 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 - Edits reload via `SPC f e r` (`nano/reload-init`, §22): re-runs init.el in-place, covers bindings/defuns/setq. Font/boot changes still need restart (`SPC q r`) — §2 vars are set-before-require and `(require 'nano)` is a no-op on reload.
 - Font/theme tweaks must run BEFORE `(require 'nano)` or nano defaults override them.
 
+## Quad workspace (§9c)
+- `SPC l c` = new tab, four equal columns: magit A | opencode A | opencode B | magit B. Both repos are read first, so a non-repo answer or an unsplittable frame aborts before anything is created (the tab is closed again).
+- `SPC l` is a `read-key` loop (`nano/workspace-dispatch`), NOT a prefix map — new workspace commands are new `cond` branches, not `define-key "l X"`. The hint line and the `?` legend carry the key.
+- Magit placement: `magit-status-setup-buffer` always routes through `magit-display-buffer`; bind §10c's `nano/magit-desktop--display-quietly` + `magit-display-buffer-noselect t`, then `set-window-buffer`. **`(require 'magit)` must come before that `let`** — let-binding `magit-display-buffer-function` before magit's `defcustom` runs makes it lexical and magit then dies with "Defining as dynamic an already lexical var". On the first `SPC l c` of a session that would be the whole command.
+- OpenCode placement: the client is async (service → create → `opencode-session-open` → `pop-to-buffer`), so there is no buffer to relocate. `display-buffer-overriding-action` is bound INSIDE the callback to a closure that `set-window-buffer`s the pane; overriding beats `display-buffer-alist`, so §6f's scratch routing cannot hijack it. `(require 'emacs-opencode)` first — `opencode--create-session` is not autoloaded.
+- Limits: magit buffers are per-repository, so a repo open in another tab shares the buffer; session panes are not restored by `SPC q r` (tab + magit only, §10c).
+
 ## OpenCode (§27)
 - CLI must be installed: `curl -fsSL https://opencode.ai/install | bash` (lands in `~/.opencode/bin`). `27a0` adds that dir to `exec-path`/`$PATH`, so GUI Emacs works without a login shell.
 - Tree-sitter grammars `markdown` + `markdown-inline` are required for session buffers; install once with `M-x treesit-install-language-grammar` (built libs land in `~/.emacs.d/tree-sitter/`).
