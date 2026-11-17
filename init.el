@@ -1962,18 +1962,81 @@ Spacemacs nth/new parity — tab-bar is gapless, so N past end appends."
 ;; already shown in another tab shares that same buffer here; and the
 ;; session panes are not restored by `SPC q r' (§5d/§10c restore the
 ;; tab and its magit buffers only).
-(defun nano/quad-workspace--read-repo (label)
-  "Read a git repository for LABEL, re-prompting when it is not one.
-Completion offers `magit-repository-directories' plus known project
-roots; any path may be typed instead.  Returns a directory name."
+;; Repo discovery for the prompt.  `magit-repository-directories' is
+;; commonly nil (this box: nil), and `project-known-project-roots' only
+;; fills as project.el is used, so the shipped reader offered an EMPTY
+;; list — and when magit did answer, it returned (NAME . PATH) pairs of
+;; which only NAME was used, which `expand-file-name' then resolved
+;; against `default-directory' and failed with "not inside a git
+;; repository".  Candidates are therefore full paths (the alist cdr,
+;; tilde-abbreviated for display), plus a bounded scan of
+;; `nano/quad-workspace-repo-roots' so a fresh Emacs still lists the
+;; repos on disk.
+(defcustom nano/quad-workspace-repo-roots '(("~" . 2))
+  "Directories scanned for git repositories by `SPC l c'.
+Each element is (DIRECTORY . DEPTH), like
+`magit-repository-directories': DEPTH 0 adds DIRECTORY itself, N stops
+N levels below it.  Purely additive: it only fills the repo prompt,
+and never changes `magit-status' behaviour."
+  :type '(repeat (cons directory integer))
+  :group 'nano)
+
+(defun nano/quad-workspace--repos-under (directory depth)
+  "Return git repositories at DIRECTORY, DEPTH levels deep.
+DIRECTORY itself is included when it is a repository, and descent
+stops at repository roots (`.git' is never walked)."
+  (let ((dir (file-name-as-directory (expand-file-name directory))))
+    (when (file-accessible-directory-p dir)
+      (append
+       (when (file-directory-p (expand-file-name ".git" dir))
+         (list dir))
+       (when (and (> depth 0)
+                  (not (file-directory-p (expand-file-name ".git" dir))))
+         (mapcan (lambda (child)
+                   (and (file-directory-p child)
+                        (not (equal (file-name-nondirectory
+                                     (directory-file-name child))
+                                    ".git"))
+                        (nano/quad-workspace--repos-under child (1- depth))))
+                 (ignore-errors
+                   (directory-files dir t directory-files-no-dot-files-regexp t))))))))
+
+(defun nano/quad-workspace--repo-paths ()
+  "Return repository directories to offer in the `SPC l c' prompt.
+Sources: `magit-list-repos' when `magit-repository-directories' is set,
+`project-known-project-roots', the current buffer's repository, and
+`nano/quad-workspace-repo-roots'.  Entries are absolute directory names,
+deduplicated, with `$HOME' abbreviated to a tilde."
   (require 'magit-repos nil t)
-  (let (root)
+  (let ((paths (append
+                ;; `magit-repos-alist' is (NAME . PATH): PATH is the repo.
+                (ignore-errors (mapcar #'cdr (magit-repos-alist)))
+                (ignore-errors (project-known-project-roots))
+                ;; NOTE: `magit-toplevel' answers a STRING; it must be
+                ;; wrapped, or `append' splices it into characters.
+                (let ((top (ignore-errors (magit-toplevel default-directory))))
+                  (when top (list top)))
+                (mapcan (lambda (spec)
+                          (nano/quad-workspace--repos-under
+                           (car spec) (cdr spec)))
+                        nano/quad-workspace-repo-roots))))
+    (delete-dups
+     (mapcar (lambda (p)
+               (file-name-as-directory
+                (abbreviate-file-name
+                 (expand-file-name (directory-file-name p)))))
+             (delq nil paths)))))
+
+(defun nano/quad-workspace--read-repo (label)
+  "Read a git repository for LABEL, re-prompting until one is found.
+Candidates come from `nano/quad-workspace--repo-paths'; the prompt does
+not require a match, so any directory path may be typed instead (an
+empty answer falls back to `read-directory-name').  Returns a directory
+name."
+  (let ((cands (nano/quad-workspace--repo-paths))
+        root)
     (while (not root)
-      (let* ((cands (delete-dups
-                     (append
-                      (ignore-errors (mapcar #'car (magit-repos-alist)))
-                      (ignore-errors (project-known-project-roots)))))
-             (pick (completing-read (format "%s: " label) cands nil nil))
+      (let* ((pick (completing-read (format "%s: " label) cands nil nil))
              (dir (if (string-empty-p pick)
                       (read-directory-name (format "%s: " label) nil t)
                     (expand-file-name pick))))
@@ -4607,7 +4670,11 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 ;; only.
 ;;
 ;; Default model: new sessions start on `nano/opencode-default-model'
-;; (27d), injected into the interactive creation path only.
+;; (27d), handed straight to the create call by the advice.  It is
+;; captured LEXICALLY, never in a dynamic variable: the first create of
+;; an Emacs session resolves agents asynchronously, so a let-binding
+;; around `opencode--create-session' is already unwound by then and a
+;; dynamic flag injects nothing (header shows no model).
 ;;
 ;; §27d–h ride on the v2 API and are wired in ONE
 ;; `with-eval-after-load 'emacs-opencode' block below 27h: the package
@@ -4788,28 +4855,39 @@ Nil when SPEC is empty or malformed."
        `((providerID . ,(match-string 1 spec))
          (id . ,(match-string 2 spec)))))
 
-(defvar nano/opencode--inject-model nil
-  "Model alist to inject into `opencode-client-session-create'.
-Bound only around interactive creation, by 27d's create-session advice.")
-
 (defun nano/opencode--create-session-advice (orig connection on-created)
-  "Bind the 27d model flag around ORIG's session creation.
+  "Create a session on CONNECTION on the 27d default model.
 ORIG is `opencode--create-session'; CONNECTION and ON-CREATED pass
-through unchanged."
-  (let ((nano/opencode--inject-model
-         (nano/opencode--model-ref nano/opencode-default-model)))
-    (funcall orig connection on-created)))
+through unchanged.  The package funnels interactive creation through
+ORIG, which passes only `:agent', so the server default would win.
 
-(defun nano/opencode--session-create-advice (orig connection &rest args)
-  "Add 27d's default model to ORIG's create call when absent.
-ORIG is the generic `opencode-client-session-create'; CONNECTION and
-ARGS are its connection and `&key' arguments."
-  (if (and nano/opencode--inject-model
-           (null (plist-get args :model)))
-      (apply orig connection
-             (plist-put (copy-sequence args)
-                        :model nano/opencode--inject-model))
-    (apply orig connection args)))
+The model is captured in the continuation rather than a dynamic
+variable on purpose: ORIG hands the create call to
+`opencode-session--ensure-agents', which answers ASYNCHRONOUSLY on the
+first session of a session (empty agent cache), i.e. after any
+let-binding around ORIG has been unwound.  That is exactly the bug
+where the session header shows no model.  A lexical capture survives
+that hop.
+Falling back to ORIG when the setting is empty or malformed keeps the
+server default as the documented escape hatch."
+  (let ((model (nano/opencode--model-ref nano/opencode-default-model)))
+    (if (null model)
+        (funcall orig connection on-created)
+      (opencode-session--ensure-agents
+       connection
+       (lambda (agents)
+         (opencode-client-session-create
+          connection
+          :agent (car (member opencode-session-default-agent agents))
+          :model model
+          :success (lambda (&rest args)
+                     (funcall on-created
+                              (opencode--session-from-data
+                               (plist-get args :data))))
+          :error (lambda (&rest args)
+                   (let ((detail (opencode-client-format-error args)))
+                     (error "Failed to create OpenCode session%s"
+                            (if detail (format " (%s)" detail) ""))))))))))
 
 ;; 27e. Cursor following is the package's own job.  The session buffer
 ;; is `text-mode' derived (no comint anywhere in this package), and the
@@ -5070,10 +5148,11 @@ first attempt at 27d–h, written against the deleted v1 API."
                  #'nano/opencode--create-session-advice)
   (advice-add 'opencode--create-session :around
               #'nano/opencode--create-session-advice)
+  ;; Reload-safe: an earlier 27d advised the client call itself.  The
+  ;; model is now captured lexically in the create-session advice above,
+  ;; so drop that stale advice if a previous init.el installed it.
   (advice-remove 'opencode-client-session-create
-                 #'nano/opencode--session-create-advice)
-  (advice-add 'opencode-client-session-create :around
-              #'nano/opencode--session-create-advice)
+                 'nano/opencode--session-create-advice)
   ;; 27f. Permission gate.
   (advice-remove 'opencode-session--prompt-permission
                  #'nano/opencode--prompt-permission-advice)
