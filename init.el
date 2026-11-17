@@ -37,7 +37,8 @@
 ;;   §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
 ;;   §26  Animal Spirit  (local autoload, SPC a a, lazy)
 ;;   §27  OpenCode v2  (jdormit/emacs-opencode, SPC a c, lazy;
-;;                        default model = nano/opencode-default-model, 27d)
+;;                        default model = nano/opencode-default-model, 27d;
+;;                        session minimap on SPC a c l, 27i)
 ;;   §28  Indentation  (global 2 spaces, Python 4)
 ;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
 ;;   §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
@@ -5134,6 +5135,413 @@ from it.  See 27g's commentary for the skip list."
                    "\nThe turn has finished; click to open the session."))
          (if failed 'critical 'normal)
          buffer)))))
+
+;; ---------------------------------------------------------------------
+;; §27i  Session minimap  (SPC a c l, read-only roster)
+;; ---------------------------------------------------------------------
+;; One line per OpenCode session, refreshed every few seconds while the
+;; buffer is on screen, so a wall of agents can be watched at once and
+;; the one that needs a human stands out.
+;;
+;; Status is POLLED, not pushed.  Verified against OpenCode v2.3.0:
+;;   - `opencode-client-session-active' (GET /api/session/active) returns
+;;     a map of sessionID -> {type:"running"} for every live run, and
+;;     empties as runs finish.  It stays empty on 1.x, hence the version
+;;     note below.
+;;   - `opencode-client-pending-permissions' (GET /api/permission/request)
+;;     is LOCATION-SCOPED: one reply covers one project directory, so it
+;;     is asked once per distinct session directory and merged.
+;; The minimap never depends on a session buffer existing, so it also
+;; works for sessions Emacs has not opened (unlike §27f/27g's advices,
+;; which hang off live buffers).
+;;
+;; Requires OpenCode 2.x: on 1.x `/api/session/active' is always `{}',
+;; so every session would read as idle.  `nano/opencode-minimap--check'
+;; says so in the echo area instead of lying.
+;;
+;; Three states, most urgent on top:
+;;   needs you   a permission request is parked for that session
+;;   working     the session has a running execution
+;;   idle        nothing to do
+;; RET opens the session by id (no buffer needed), `g' re-polls.
+
+(defcustom nano/opencode-minimap-interval 5
+  "Seconds between session-minimap refreshes while it is visible."
+  :type 'number
+  :group 'nano)
+
+(defcustom nano/opencode-minimap-limit 200
+  "Maximum number of sessions the minimap lists."
+  :type 'integer
+  :group 'nano)
+
+(defface nano/opencode-minimap-waiting
+  '((t :inherit error :weight bold))
+  "Face for a session blocked on the user."
+  :group 'nano)
+
+(defface nano/opencode-minimap-busy
+  '((t :inherit warning))
+  "Face for a session that is running."
+  :group 'nano)
+
+(defface nano/opencode-minimap-idle
+  '((t :inherit shadow))
+  "Face for a session with nothing to do."
+  :group 'nano)
+
+(defvar nano/opencode-minimap--sessions nil
+  "Session alists from the last successful poll.")
+
+(defvar nano/opencode-minimap--busy (make-hash-table :test 'equal)
+  "Session ids with a running execution.")
+
+(defvar nano/opencode-minimap--waiting (make-hash-table :test 'equal)
+  "Session ids with a pending permission request, to its action.")
+
+(defvar nano/opencode-minimap--timer nil
+  "Repeating refresh timer, started on first open.")
+
+(defvar nano/opencode-minimap--in-flight nil
+  "Non-nil while a poll is outstanding, so ticks never overlap.")
+
+(defvar nano/opencode-minimap--frame 0
+  "Current spinner frame index.")
+
+(defvar nano/opencode-minimap--spin-timer nil
+  "Repeating spinner timer, started on first open.")
+
+(defvar-local nano/opencode-minimap--marks nil
+  "Markers at each row's state column, as (MARKER . STATE-KEY).
+Rebuilt by every redraw; the spinner walks this list to repaint only
+the marks, so animation never moves point or scrolls the window.")
+
+(defvar-keymap nano/opencode-minimap-mode-map
+  :parent special-mode-map
+  "g" #'nano/opencode-minimap-refresh
+  "RET" #'nano/opencode-minimap-visit)
+
+(define-derived-mode nano/opencode-minimap-mode special-mode "OC-Roster"
+  "Read-only roster of every OpenCode session.
+\\<nano/opencode-minimap-mode-map>
+\\[nano/opencode-minimap-refresh] re-polls the server;
+\\[nano/opencode-minimap-visit] opens the session on the current line."
+  (setq truncate-lines t))
+
+(defun nano/opencode-minimap--key (session)
+  "Return the table key for SESSION.
+`/api/session/active' is a JSON object, and this client interns object
+keys into symbols, so the busy table is keyed by symbol while the
+permission table is keyed by the plain string id."
+  (intern (or (alist-get 'id session) "")))
+
+(defconst nano/opencode-minimap-states
+  '((waiting "!!" "needs you")
+    (busy    "-"  "working")
+    (idle    "."  "idle"))
+  "Roster states as (KEY MARK LABEL), most urgent first.
+ASCII on purpose: emoji need a colour-emoji font and geometric glyphs
+(`●', `▶') need a font that carries them, and neither is guaranteed on
+an arbitrary machine.  `!!', `-', `.` exist in every monospace font.
+
+The busy mark is the first frame of `nano/opencode-minimap-spin-frames';
+`nano/opencode-minimap--spin' cycles it in place, so a running session
+visibly moves while a human scans the list.")
+
+(defconst nano/opencode-minimap-spin-frames
+  ["-" "\\" "|" "/"]
+  "ASCII spinner frames for a running session.
+All four are one character wide, so the live update is a plain
+`subst-char-in-region': text properties, buttons and point survive it.")
+
+(defcustom nano/opencode-minimap-spin-interval 0.35
+  "Seconds between spinner frames while the roster is visible."
+  :type 'number
+  :group 'nano)
+
+(defun nano/opencode-minimap--spin-char ()
+  "Return the spinner character for the current frame."
+  (aref nano/opencode-minimap-spin-frames
+        (mod (or nano/opencode-minimap--frame 0)
+             (length nano/opencode-minimap-spin-frames))))
+
+(defun nano/opencode-minimap--state (session)
+  "Return (KEY MARK LABEL FACE) describing SESSION's state.
+A running session's MARK is the live spinner character."
+  (let* ((id (alist-get 'id session))
+         (busy (gethash (nano/opencode-minimap--key session)
+                        nano/opencode-minimap--busy))
+         (waiting (gethash id nano/opencode-minimap--waiting)))
+    (pcase (cond (waiting 'waiting) (busy 'busy) (t 'idle))
+      ('waiting (list 'waiting "!!" "needs you" 'nano/opencode-minimap-waiting))
+      ('busy    (list 'busy (nano/opencode-minimap--spin-char)
+                      "working" 'nano/opencode-minimap-busy))
+      (_        (list 'idle "." "idle" 'nano/opencode-minimap-idle)))))
+
+(defun nano/opencode-minimap--rank (state)
+  "Return the sort rank of STATE, urgent first."
+  (pcase state ('waiting 0) ('busy 1) (_ 2)))
+
+(defun nano/opencode-minimap--order (a b)
+  "Return non-nil when session A sorts before session B.
+Urgent states first, then most recently updated."
+  (let ((sa (car (nano/opencode-minimap--state a)))
+        (sb (car (nano/opencode-minimap--state b))))
+    (if (eq sa sb)
+        (> (or (alist-get 'updated (alist-get 'time b)) 0)
+           (or (alist-get 'updated (alist-get 'time a)) 0))
+      (< (nano/opencode-minimap--rank sa)
+         (nano/opencode-minimap--rank sb)))))
+
+(defun nano/opencode-minimap--insert (session)
+  "Insert the roster line for SESSION and make it a button."
+  (let* ((state (nano/opencode-minimap--state session))
+         (id (alist-get 'id session))
+         (title (or (alist-get 'title session) "(untitled)"))
+         (agent (or (alist-get 'agent session) "-"))
+         (directory (or (alist-get 'directory (alist-get 'location session)) ""))
+         (start (point)))
+    (let ((marker (copy-marker (point))))
+      (insert (propertize (format "%-3s" (nth 1 state)) 'face (nth 3 state))
+              (propertize (format "%-40s"
+                                  (truncate-string-to-width title 40 0 nil "..."))
+                          'face (nth 3 state))
+              (propertize (format " %-8s %s\n" agent
+                                  (abbreviate-file-name directory))
+                          'face 'nano-face-header-faded))
+      (push (cons marker (car state)) nano/opencode-minimap--marks))
+    (make-text-button start (line-end-position)
+                      'action #'nano/opencode-minimap--press
+                      'session-id id 'directory directory
+                      'help-echo (format "%s - RET opens this session"
+                                         (nth 2 state)))))
+
+(defun nano/opencode-minimap--redraw (buffer)
+  "Render the roster into BUFFER from the cached poll results.
+Point is kept on the same session when it was already on a row, so the
+5 s refresh and the spinner never yank the cursor away."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let* ((inhibit-read-only t)
+             (at-point (and (button-at (point))
+                            (button-get (button-at (point)) 'session-id)))
+             (rows (sort (copy-sequence nano/opencode-minimap--sessions)
+                         #'nano/opencode-minimap--order)))
+        (setq nano/opencode-minimap--marks nil)
+        (erase-buffer)
+        (insert (propertize
+                 (concat "!! needs you"
+                         "      "
+                         (mapconcat #'identity
+                                    (append nano/opencode-minimap-spin-frames nil)
+                                    "")
+                         " working"
+                         "      "
+                         ". idle"
+                         "\n")
+                 'face 'nano-face-header-faded))
+        (insert (propertize (format "%-4s%-40s %-8s %s\n"
+                                    "ST" "SESSION" "AGENT" "DIRECTORY")
+                            'face 'nano-face-header-faded))
+        (if (null rows)
+            (insert (propertize "     no sessions - SPC a c n starts one\n"
+                                'face 'nano/opencode-minimap-idle))
+          (dolist (session rows)
+            (nano/opencode-minimap--insert session)))
+        (goto-char (point-min))
+        (forward-line 2)
+        (when at-point
+          (let ((found nil))
+            (while (and (not found) (not (eobp)))
+              (if (equal at-point
+                         (and (button-at (point))
+                              (button-get (button-at (point)) 'session-id)))
+                  (setq found t)
+                (forward-line 1)))))
+        (set-buffer-modified-p nil)))))
+
+(defun nano/opencode-minimap--finish (buffer)
+  "Clear the in-flight flag and redraw BUFFER."
+  (setq nano/opencode-minimap--in-flight nil)
+  (nano/opencode-minimap--redraw buffer))
+
+(defun nano/opencode-minimap--poll-active (connection buffer)
+  "Fill the busy table from CONNECTION, then redraw BUFFER."
+  (opencode-client-session-active
+   connection
+   :success
+   (lambda (&rest args)
+     (clrhash nano/opencode-minimap--busy)
+     (dolist (cell (plist-get args :data))
+       (when (equal (alist-get 'type (cdr cell)) "running")
+         (puthash (car cell) t nano/opencode-minimap--busy)))
+     (nano/opencode-minimap--finish buffer))
+   :error (lambda (&rest _) (nano/opencode-minimap--finish buffer))))
+
+(defun nano/opencode-minimap--merge-permissions (connection directories done)
+  "Ask CONNECTION for pending permissions in each of DIRECTORIES.
+Merge the replies into `nano/opencode-minimap--waiting' and call DONE
+once every directory answered, right or wrong: a roster that waits on a
+broken project would never draw."
+  (let* ((seen (delete-dups (delq nil (copy-sequence directories))))
+         (left (length seen)))
+    (if (zerop left)
+        (funcall done)
+      (dolist (directory seen)
+        (let ((default-directory (file-name-as-directory directory)))
+          (opencode-client-pending-permissions
+           connection
+           :success
+           (lambda (&rest args)
+             (dolist (permission (plist-get args :data))
+               (puthash (alist-get 'sessionID permission)
+                        (or (alist-get 'action permission) t)
+                        nano/opencode-minimap--waiting))
+             (when (zerop (cl-decf left)) (funcall done)))
+           :error (lambda (&rest _)
+                    (when (zerop (cl-decf left)) (funcall done)))))))))
+
+(defun nano/opencode-minimap--poll (connection buffer sessions)
+  "Poll permissions for SESSIONS then activity, and redraw BUFFER."
+  (clrhash nano/opencode-minimap--waiting)
+  (nano/opencode-minimap--merge-permissions
+   connection
+   (mapcar (lambda (session)
+             (alist-get 'directory (alist-get 'location session)))
+           sessions)
+   (lambda () (nano/opencode-minimap--poll-active connection buffer))))
+
+(defun nano/opencode-minimap--on-sessions (connection buffer)
+  "Redraw BUFFER with CONNECTION's session list, then poll their state."
+  (opencode-client-sessions
+   connection
+   :limit nano/opencode-minimap-limit
+   :roots t
+   :success (lambda (&rest args)
+              (let ((sessions (append (plist-get args :data) nil)))
+                (setq nano/opencode-minimap--sessions sessions)
+                (nano/opencode-minimap--poll connection buffer sessions)))
+   :error (lambda (&rest _)
+            (nano/opencode-minimap--finish buffer)
+            (message "OpenCode minimap: cannot list sessions"))))
+
+(defun nano/opencode-minimap-refresh ()
+  "Poll the OpenCode server and redraw the roster in the current buffer."
+  (interactive)
+  (unless nano/opencode-minimap--in-flight
+    (setq nano/opencode-minimap--in-flight t)
+    (let ((buffer (current-buffer))
+          (directory (if (and default-directory
+                              (file-directory-p default-directory))
+                         default-directory
+                       "~")))
+      (condition-case err
+          (progn
+            (require 'emacs-opencode)
+            (opencode-run-server
+             directory
+             (lambda (connection)
+               (nano/opencode-minimap--on-sessions connection buffer))))
+        (error
+         (nano/opencode-minimap--finish buffer)
+         (message "OpenCode minimap: %s" (error-message-string err)))))))
+
+(defun nano/opencode-minimap--press (button)
+  "Open BUTTON's session."
+  (opencode-open-session-by-id (button-get button 'session-id)
+                               (button-get button 'directory)))
+
+(defun nano/opencode-minimap-visit ()
+  "Open the session listed on the current line."
+  (interactive)
+  (if (button-at (point))
+      (push-button)
+    (user-error "No session on this line")))
+
+(defun nano/opencode-minimap--spin-step (buffer)
+  "Advance one spinner frame in BUFFER's roster rows.
+Only the one-character state column of running rows is rewritten, via
+`subst-char-in-region', so text properties, buttons and point survive
+and nothing re-lays out."
+  (setq nano/opencode-minimap--frame
+        (1+ (or nano/opencode-minimap--frame 0)))
+  (let ((char (aref (nano/opencode-minimap--spin-char) 0)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (dolist (cell nano/opencode-minimap--marks)
+          (let ((marker (car cell)))
+            (when (and (eq (cdr cell) 'busy)
+                       (marker-position marker)
+                       (not (eq (char-after marker) char)))
+              (subst-char-in-region marker (1+ marker)
+                                    (char-after marker) char t))))))))
+
+(defun nano/opencode-minimap--spin ()
+  "Advance the spinner when the roster is on screen.
+Idle frames cost one `get-buffer-window' call and nothing else."
+  (when-let* ((buffer (get-buffer "*OpenCode Roster*")))
+    (when (and (buffer-live-p buffer) (get-buffer-window buffer))
+      (nano/opencode-minimap--spin-step buffer))))
+
+(defun nano/opencode-minimap--tick ()
+  "Refresh the roster when it is visible; stay silent otherwise."
+  (when-let* ((buffer (get-buffer "*OpenCode Roster*")))
+    (when (and (buffer-live-p buffer) (get-buffer-window buffer))
+      (with-current-buffer buffer
+        (nano/opencode-minimap-refresh)))))
+
+(defun nano/opencode-minimap--server-version ()
+  "Return the OpenCode server version string, or nil when unknown.
+`opencode-connection-registration-file' carries it from v2 on; 1.x
+registrations have no `version' field at all."
+  (when (boundp 'opencode-connection-registration-file)
+    (let ((file (opencode-connection-registration-file)))
+      (when (file-readable-p file)
+        (ignore-errors
+          (with-temp-buffer
+            (insert-file-contents file)
+            (alist-get 'version (json-parse-buffer :object-type 'alist))))))))
+
+(defun nano/opencode-minimap--check ()
+  "Warn when the roster cannot tell running sessions apart.
+On OpenCode 1.x `/api/session/active' always answers `{}', so every
+session would read as idle: a minimap that never lights up is worse
+than none.  Returns non-nil when the server is v2 or its version is
+unknown (nothing to warn about)."
+  (let ((version (nano/opencode-minimap--server-version)))
+    (or (null version)
+        (not (string-prefix-p "1." version))
+        (progn
+          (message "OpenCode minimap needs v2: server is %s, so running \
+sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
+                   version)
+          nil))))
+
+;;;###autoload
+(defun nano/opencode-minimap ()
+  "Show the live roster of every OpenCode session (SPC a c l)."
+  (interactive)
+  (nano/opencode-minimap--check)
+  (let ((buffer (get-buffer-create "*OpenCode Roster*")))
+    (with-current-buffer buffer
+      (unless (eq major-mode 'nano/opencode-minimap-mode)
+        (nano/opencode-minimap-mode)))
+    (pop-to-buffer buffer)
+    (nano/opencode-minimap-refresh)
+    (unless (timerp nano/opencode-minimap--timer)
+      (setq nano/opencode-minimap--timer
+            (run-with-timer nano/opencode-minimap-interval
+                            nano/opencode-minimap-interval
+                            #'nano/opencode-minimap--tick)))
+    (unless (timerp nano/opencode-minimap--spin-timer)
+      (setq nano/opencode-minimap--spin-timer
+            (run-with-timer nano/opencode-minimap-spin-interval
+                            nano/opencode-minimap-spin-interval
+                            #'nano/opencode-minimap--spin)))
+    buffer))
+
+(define-key spacemacs-leader-map (kbd "a c l") #'nano/opencode-minimap)
+(which-key-add-key-based-replacements "SPC a c l" "session minimap")
 
 
 ;; ---------------------------------------------------------------------
