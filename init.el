@@ -5230,9 +5230,16 @@ from it.  See 27g's commentary for the skip list."
 ;;   - `opencode-client-pending-permissions' (GET /api/permission/request)
 ;;     is LOCATION-SCOPED: one reply covers one project directory, so it
 ;;     is asked once per distinct session directory and merged.
-;; The minimap never depends on a session buffer existing, so it also
-;; works for sessions Emacs has not opened (unlike §27f/27g's advices,
-;; which hang off live buffers).
+;; Scope: only sessions with a LIVE Emacs buffer are listed (the package
+;; registry `opencode-session--buffers', filtered by `buffer-live-p').
+;; The roster is a window switcher for this Emacs, not a server
+;; inventory, so a session started from the CLI or another editor stays
+;; out of it.  State is still polled from the server, so the rows are
+;; accurate for sessions whose buffer exists but is not selected.
+;;
+;; Layout: exactly three fields - status, name, directory - and every
+;; line is capped at `nano/opencode-minimap-width' (80) columns, so the
+;; roster reads the same in a narrow side window and a wide frame.
 ;;
 ;; Requires OpenCode 2.x: on 1.x `/api/session/active' is always `{}',
 ;; so every session would read as idle.  `nano/opencode-minimap--check'
@@ -5250,9 +5257,24 @@ from it.  See 27g's commentary for the skip list."
   :group 'nano)
 
 (defcustom nano/opencode-minimap-limit 200
-  "Maximum number of sessions the minimap lists."
+  "Maximum number of sessions fetched before the roster filters them.
+Only sessions with a live Emacs buffer are then listed, so this is a
+cap on the server reply, not on the visible row count."
   :type 'integer
   :group 'nano)
+
+(defcustom nano/opencode-minimap-width 80
+  "Maximum roster line width, in columns.
+Three fields share it: status, name, directory.  The directory column
+absorbs whatever the other two leave, so the cap always holds."
+  :type 'integer
+  :group 'nano)
+
+(defconst nano/opencode-minimap-state-width 3
+  "Width of the roster's status column (2-char mark plus a space).")
+
+(defconst nano/opencode-minimap-name-width 38
+  "Width of the roster's session-name column.")
 
 (defface nano/opencode-minimap-waiting
   '((t :inherit error :weight bold))
@@ -5301,7 +5323,7 @@ the marks, so animation never moves point or scrolls the window.")
   "RET" #'nano/opencode-minimap-visit)
 
 (define-derived-mode nano/opencode-minimap-mode special-mode "OC-Roster"
-  "Read-only roster of every OpenCode session.
+  "Read-only roster of the OpenCode sessions this Emacs has open.
 \\<nano/opencode-minimap-mode-map>
 \\[nano/opencode-minimap-refresh] re-polls the server;
 \\[nano/opencode-minimap-visit] opens the session on the current line."
@@ -5372,22 +5394,54 @@ Urgent states first, then most recently updated."
       (< (nano/opencode-minimap--rank sa)
          (nano/opencode-minimap--rank sb)))))
 
+(defun nano/opencode-minimap--open-p (session)
+  "Return non-nil when SESSION has a live Emacs session buffer.
+The roster lists what this Emacs has open, so a session that exists on
+the server but was never opened here (or whose buffer was killed) is
+left out."
+  (let ((buffer (and (bound-and-true-p opencode-session--buffers)
+                     (gethash (or (alist-get 'id session) "")
+                              opencode-session--buffers))))
+    (and (bufferp buffer) (buffer-live-p buffer))))
+
+(defun nano/opencode-minimap--directory-width ()
+  "Return the columns left for the directory field.
+Whatever the status and name columns do not use, minus one separator."
+  (max 8 (- nano/opencode-minimap-width
+            nano/opencode-minimap-state-width
+            nano/opencode-minimap-name-width
+            1)))
+
+(defun nano/opencode-minimap--field (text width)
+  "Return TEXT truncated to WIDTH columns and padded to fill it."
+  (format (format "%%-%ds" width)
+          (truncate-string-to-width (or text "") width 0 nil "...")))
+
 (defun nano/opencode-minimap--insert (session)
-  "Insert the roster line for SESSION and make it a button."
+  "Insert the roster line for SESSION and make it a button.
+Exactly three fields - status, name, directory - capped at
+`nano/opencode-minimap-width'; trailing padding is trimmed so no line
+carries invisible whitespace."
   (let* ((state (nano/opencode-minimap--state session))
          (id (alist-get 'id session))
          (title (or (alist-get 'title session) "(untitled)"))
-         (agent (or (alist-get 'agent session) "-"))
          (directory (or (alist-get 'directory (alist-get 'location session)) ""))
+         (line (string-trim-right
+                (concat
+                 (nano/opencode-minimap--field (nth 1 state)
+                                               nano/opencode-minimap-state-width)
+                 (nano/opencode-minimap--field title nano/opencode-minimap-name-width)
+                 " "
+                 (truncate-string-to-width
+                  (abbreviate-file-name directory)
+                  (nano/opencode-minimap--directory-width) 0 nil "..."))))
          (start (point)))
     (let ((marker (copy-marker (point))))
-      (insert (propertize (format "%-3s" (nth 1 state)) 'face (nth 3 state))
-              (propertize (format "%-40s"
-                                  (truncate-string-to-width title 40 0 nil "..."))
+      (insert (propertize (substring line 0 nano/opencode-minimap-state-width)
                           'face (nth 3 state))
-              (propertize (format " %-8s %s\n" agent
-                                  (abbreviate-file-name directory))
-                          'face 'nano-face-header-faded))
+              (propertize (substring line nano/opencode-minimap-state-width)
+                          'face 'nano-face-header-faded)
+              "\n")
       (push (cons marker (car state)) nano/opencode-minimap--marks))
     (make-text-button start (line-end-position)
                       'action #'nano/opencode-minimap--press
@@ -5419,11 +5473,18 @@ Point is kept on the same session when it was already on a row, so the
                          ". idle"
                          "\n")
                  'face 'nano-face-header-faded))
-        (insert (propertize (format "%-4s%-40s %-8s %s\n"
-                                    "ST" "SESSION" "AGENT" "DIRECTORY")
-                            'face 'nano-face-header-faded))
+        (insert (propertize
+                 (string-trim-right
+                  (concat
+                   (nano/opencode-minimap--field "ST" nano/opencode-minimap-state-width)
+                   (nano/opencode-minimap--field "NAME" nano/opencode-minimap-name-width)
+                   " "
+                   (nano/opencode-minimap--field
+                    "DIR" (nano/opencode-minimap--directory-width))))
+                 'face 'nano-face-header-faded)
+                "\n")
         (if (null rows)
-            (insert (propertize "     no sessions - SPC a c n starts one\n"
+            (insert (propertize "no open sessions - SPC a c n starts one\n"
                                 'face 'nano/opencode-minimap-idle))
           (dolist (session rows)
             (nano/opencode-minimap--insert session)))
@@ -5497,7 +5558,8 @@ broken project would never draw."
    :limit nano/opencode-minimap-limit
    :roots t
    :success (lambda (&rest args)
-              (let ((sessions (append (plist-get args :data) nil)))
+              (let ((sessions (seq-filter #'nano/opencode-minimap--open-p
+                                          (append (plist-get args :data) nil))))
                 (setq nano/opencode-minimap--sessions sessions)
                 (nano/opencode-minimap--poll connection buffer sessions)))
    :error (lambda (&rest _)
