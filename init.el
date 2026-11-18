@@ -5329,19 +5329,29 @@ absorbs whatever the other two leave, so the cap always holds."
 (defconst nano/opencode-minimap-name-width 38
   "Width of the roster's session-name column.")
 
+;; Status faces inherit BUFFER faces (`nano-face-popout'/`salient'/`faded'),
+;; never the `nano-face-header-*' bar faces: those are modeline blocks and
+;; carry a hardcoded `#fbf8ef' on `#7e7482', which is what painted every
+;; roster row near-white on dark grey.  Buffer faces also follow the live
+;; theme, so `SPC t n' recolours the roster with everything else.
 (defface nano/opencode-minimap-waiting
-  '((t :inherit error :weight bold))
+  '((t :inherit nano-face-popout :weight bold))
   "Face for a session blocked on the user."
   :group 'nano)
 
 (defface nano/opencode-minimap-busy
-  '((t :inherit warning))
+  '((t :inherit nano-face-salient))
   "Face for a session that is running."
   :group 'nano)
 
 (defface nano/opencode-minimap-idle
-  '((t :inherit shadow))
+  '((t :inherit nano-face-faded))
   "Face for a session with nothing to do."
+  :group 'nano)
+
+(defface nano/opencode-minimap-name
+  '((t :inherit nano-face-faded))
+  "Face for a roster row's name and directory fields."
   :group 'nano)
 
 (defvar nano/opencode-minimap--sessions nil
@@ -5493,10 +5503,10 @@ carries invisible whitespace."
       (insert (propertize (substring line 0 nano/opencode-minimap-state-width)
                           'face (nth 3 state))
               (propertize (substring line nano/opencode-minimap-state-width)
-                          'face 'nano-face-header-faded)
+                          'face 'nano/opencode-minimap-name)
               "\n")
       (push (cons marker (car state)) nano/opencode-minimap--marks))
-    (make-text-button start (line-end-position)
+    (make-text-button start (save-excursion (goto-char start) (line-end-position))
                       'action #'nano/opencode-minimap--press
                       'session-id id 'directory directory
                       'help-echo (format "%s - RET opens this session"
@@ -5515,34 +5525,12 @@ Point is kept on the same session when it was already on a row, so the
                          #'nano/opencode-minimap--order)))
         (setq nano/opencode-minimap--marks nil)
         (erase-buffer)
-        (insert (propertize
-                 (concat "!! needs you"
-                         "      "
-                         (mapconcat #'identity
-                                    (append nano/opencode-minimap-spin-frames nil)
-                                    "")
-                         " working"
-                         "      "
-                         ". idle"
-                         "\n")
-                 'face 'nano-face-header-faded))
-        (insert (propertize
-                 (string-trim-right
-                  (concat
-                   (nano/opencode-minimap--field "ST" nano/opencode-minimap-state-width)
-                   (nano/opencode-minimap--field "NAME" nano/opencode-minimap-name-width)
-                   " "
-                   (nano/opencode-minimap--field
-                    "DIR" (nano/opencode-minimap--directory-width))))
-                 'face 'nano-face-header-faded)
-                "\n")
         (if (null rows)
             (insert (propertize "no open sessions - SPC a c n starts one\n"
                                 'face 'nano/opencode-minimap-idle))
           (dolist (session rows)
             (nano/opencode-minimap--insert session)))
         (goto-char (point-min))
-        (forward-line 2)
         (when at-point
           (let ((found nil))
             (while (and (not found) (not (eobp)))
