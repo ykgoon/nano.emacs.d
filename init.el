@@ -4148,6 +4148,19 @@ Set by nav commands, consumed by RET DWIM below.")
   "Reset nav flag on each minibuffer prompt (buffer reused across reads)."
   (setq-local nano/org-roam--fido-navigated nil))
 
+(defun nano/org-roam--fido-proper (comps)
+  "Return COMPS as a proper list, stripping a base-size tail.
+`completion-all-sorted-completions' caches `(nconc all base-size)':
+a fresh computation is dotted like (c1 c2 . 0) and even the sole
+candidate is (c1 . 0).  `mapcar'/`butlast' die on that atom
+(wrong-type-argument listp 0).  Walk conses while they are conses;
+the base-size marker is dropped (roam tables are flat strings,
+base 0, and force-complete recomputes when the cache is nil)."
+  (let (out)
+    (while (consp comps)
+      (push (pop comps) out))
+    (nreverse out)))
+
 (defun nano/org-roam--fido-nav ()
   "Selectrum/vertico-style candidate movement for roam prompts.
 Ignore any stale icomplete rotation state and always advance from
@@ -4159,7 +4172,8 @@ the end).  Non-roam minibuffers fall back to stock behaviour."
       (icomplete-forward-completions)
     (let* ((beg (icomplete--field-beg))
            (end (icomplete--field-end))
-           (comps (completion-all-sorted-completions beg end)))
+           (comps (nano/org-roam--fido-proper
+                   (completion-all-sorted-completions beg end))))
       (when (consp comps)
         (completion--cache-all-sorted-completions
          beg end
@@ -4173,7 +4187,8 @@ the end).  Non-roam minibuffers fall back to stock behaviour."
       (icomplete-backward-completions)
     (let* ((beg (icomplete--field-beg))
            (end (icomplete--field-end))
-           (comps (completion-all-sorted-completions beg end)))
+           (comps (nano/org-roam--fido-proper
+                   (completion-all-sorted-completions beg end))))
       ;; Rotate only when >= 2 candidates: consing the last element of
       ;; a single-entry list onto itself would DUPLICATE it in the
       ;; cache (a a) and RET would then force-complete a doubled title.
@@ -4199,9 +4214,11 @@ highlighted).  Non-roam minibuffers fall back to `icomplete-fido-ret'."
 
 (defun nano/icomplete-fido-tab-dwim ()
   "TAB DWIM for roam: fill input with focused candidate (preview).
-Never selects: RET after TAB still exits with the literal text
-(unless the user navigates afterwards).  Non-roam minibuffers
-fall back to `minibuffer-complete'."
+Fills the input with the current first candidate via
+`minibuffer-force-complete' (vertico `vertico-insert' parity:
+after TAB the filled text IS the input, so the next RET
+submits it).  Never sets the navigated/select state.  Non-roam
+minibuffers fall back to `minibuffer-complete'."
   (interactive)
   (if (nano/org-roam--fido-in-roam-p)
       (minibuffer-force-complete nil nil 'dont-cycle)
