@@ -4101,35 +4101,87 @@ With prefix ARG, also copy to kill-ring + clipboard."
     (concat "SPC " (nth 1 b)) (nth 3 b)))
 (which-key-add-key-based-replacements "SPC o d" "dailies")
 
-;; 21d. RET creates new node — fido DWIM for `org-roam-node' category.
+;; 21d. RET / TAB / nav semantics — Spacemacs-style "ghost highlight" for
+;;      `org-roam-node' category.
 ;;      `org-roam-node-read' (org-roam-node.el) uses `completing-read'
 ;;      with REQUIRE-MATCH=nil: any literal string becomes a new node
-;;      via `org-roam-node-create :title'.  Stock fido rebinds RET to
-;;      `icomplete-fido-ret' -> `force-complete-and-exit', coercing a
-;;      unique name to the first fuzzy match (new entry impossible).
-;;      DWIM: plain RET exits literal (new node, or exact existing);
-;;      RET after navigation selects highlighted candidate.
-;;      Nav keys: C-j/C-k (§8), C-n/C-p/arrows, C-s/C-r, C-./C-,,
-;;      M-</M-> (vertical goto-first/last).  Other categories delegate
-;;      to stock `icomplete-fido-ret'.  `M-j' (`icomplete-fido-exit')
-;;      and `C-M-j' (force) unchanged.
+;;      via `org-roam-node-create :title'.  With fido-vertical, the
+;;      first candidate LOOKS selected (highlighted, RET would pick it)
+;;      but was never actually chosen by the user.
+;;      Spacemacs/vertico semantics (emulated):
+;;        * the list is a passive menu: RET always submits the TYPED
+;;          input (new node, or exact existing title);
+;;        * moving into the list (C-j/C-k/C-n/C-p/arrows/M-</M->)
+;;          actively selects the focused candidate;
+;;        * TAB fills the input with the currently focused candidate
+;;          (preview) WITHOUT selecting it — after TAB, RET still
+;;          creates/uses the literal text unless the user navigates
+;;          again (navigation re-arms selection);
+;;        * C-M-j keeps stock "force select first".
+;;      Implementation: selection state is NOT the icomplete rotation
+;;      (which auto-focuses entry 1 on every keystroke).  Nav commands
+;;      are advised :override for roam prompts with a
+;;      selectrum/vertico-style mover that rebuilds the rotation from
+;;      scratch each time (stateless), so a later refilter restarts at
+;;      the top again.  RET and TAB are plain DWIM commands bound in
+;;      `icomplete-fido-mode-map', delegating to stock behaviour for
+;;      non-roam prompts (same pattern as RET, no transient maps).
 ;;      NOTE: plain RET must be `exit-minibuffer', NOT
 ;;      `minibuffer-complete-and-exit' — the latter expands a new
 ;;      prefix to the first flex match on first RET (still forces
 ;;      existing), while `exit-minibuffer' preserves the literal.
 (defvar-local nano/org-roam--fido-navigated nil
-  "Non-nil when completions rotated in current roam prompt.
-Set by nav-key advice, consumed by RET DWIM below.")
+  "Non-nil when user actively moved into the candidate list.
+Set by nav commands, consumed by RET DWIM below.")
 
-(defun nano/org-roam--fido-mark-navigated (&rest _)
+(defun nano/org-roam--fido-in-roam-p ()
+  "Non-nil in a roam completion minibuffer."
+  (and (minibufferp)
+       (eq (ignore-errors (icomplete--category)) 'org-roam-node)))
+
+(defun nano/org-roam--fido-mark-navigated ()
   "Flag current minibuffer as navigated for roam RET DWIM."
-  (when (and (minibufferp)
-             (eq (ignore-errors (icomplete--category)) 'org-roam-node))
+  (when (nano/org-roam--fido-in-roam-p)
     (setq nano/org-roam--fido-navigated t)))
 
 (defun nano/org-roam--fido-setup ()
   "Reset nav flag on each minibuffer prompt (buffer reused across reads)."
   (setq-local nano/org-roam--fido-navigated nil))
+
+(defun nano/org-roam--fido-nav ()
+  "Selectrum/vertico-style candidate movement for roam prompts.
+Ignore any stale icomplete rotation state and always advance from
+the FIRST candidate of the freshly filtered list, so the
+highlighted entry moves down one step per invocation (wrapping at
+the end).  Non-roam minibuffers fall back to stock behaviour."
+  (interactive)
+  (if (not (nano/org-roam--fido-in-roam-p))
+      (icomplete-forward-completions)
+    (let* ((beg (icomplete--field-beg))
+           (end (icomplete--field-end))
+           (comps (completion-all-sorted-completions beg end)))
+      (when (consp comps)
+        (completion--cache-all-sorted-completions
+         beg end
+         (nconc (cdr comps) (list (car comps)))))
+      (nano/org-roam--fido-mark-navigated))))
+
+(defun nano/org-roam--fido-nav-back ()
+  "Backward variant of `nano/org-roam--fido-nav'."
+  (interactive)
+  (if (not (nano/org-roam--fido-in-roam-p))
+      (icomplete-backward-completions)
+    (let* ((beg (icomplete--field-beg))
+           (end (icomplete--field-end))
+           (comps (completion-all-sorted-completions beg end)))
+      ;; Rotate only when >= 2 candidates: consing the last element of
+      ;; a single-entry list onto itself would DUPLICATE it in the
+      ;; cache (a a) and RET would then force-complete a doubled title.
+      (when (and (consp comps) (consp (cdr comps)))
+        (completion--cache-all-sorted-completions
+         beg end
+         (cons (car (last comps)) (butlast comps))))
+      (nano/org-roam--fido-mark-navigated))))
 
 (defun nano/icomplete-fido-ret-roam-dwim ()
   "RET DWIM for roam: literal (new node) unless navigated.
@@ -4138,22 +4190,53 @@ nil, so unique name creates node, exact title opens existing).
 After navigation -> `icomplete-force-complete-and-exit' (select
 highlighted).  Non-roam minibuffers fall back to `icomplete-fido-ret'."
   (interactive)
-  (if (eq (ignore-errors (icomplete--category)) 'org-roam-node)
+  (if (nano/org-roam--fido-in-roam-p)
       (if nano/org-roam--fido-navigated
           (progn (setq nano/org-roam--fido-navigated nil)
                  (call-interactively #'icomplete-force-complete-and-exit))
         (call-interactively #'exit-minibuffer))
     (call-interactively #'icomplete-fido-ret)))
 
+(defun nano/icomplete-fido-tab-dwim ()
+  "TAB DWIM for roam: fill input with focused candidate (preview).
+Never selects: RET after TAB still exits with the literal text
+(unless the user navigates afterwards).  Non-roam minibuffers
+fall back to `minibuffer-complete'."
+  (interactive)
+  (if (nano/org-roam--fido-in-roam-p)
+      (minibuffer-force-complete nil nil 'dont-cycle)
+    (minibuffer-complete)))
+
 (with-eval-after-load 'icomplete
+  ;; DWIM commands in the fido map (harmless in non-roam prompts: they
+  ;; delegate to stock behaviour there).  TAB: stock fido leaves TAB to
+  ;; `minibuffer-local-completion-map' (`minibuffer-complete'), which is
+  ;; exactly what the DWIM falls back to — no behaviour change outside roam.
   (define-key icomplete-fido-mode-map (kbd "RET") #'nano/icomplete-fido-ret-roam-dwim)
   (define-key icomplete-fido-mode-map (kbd "C-m") #'nano/icomplete-fido-ret-roam-dwim)
-  (advice-add 'icomplete-forward-completions :after #'nano/org-roam--fido-mark-navigated)
-  (advice-add 'icomplete-backward-completions :after #'nano/org-roam--fido-mark-navigated)
+  (define-key icomplete-fido-mode-map (kbd "TAB") #'nano/icomplete-fido-tab-dwim)
+  ;; Nav: :override for roam prompts only (delegates to stock elsewhere).
+  (advice-add 'icomplete-forward-completions :override #'nano/org-roam--fido-nav)
+  (advice-add 'icomplete-backward-completions :override #'nano/org-roam--fido-nav-back)
   (when (fboundp 'icomplete-vertical-goto-first)
-    (advice-add 'icomplete-vertical-goto-first :after #'nano/org-roam--fido-mark-navigated))
+    (advice-add 'icomplete-vertical-goto-first :override
+                (lambda ()
+                  (interactive)
+                  (if (nano/org-roam--fido-in-roam-p)
+                      (while (nano/org-roam--fido-nav))
+                    (while (icomplete-forward-completions))))))
   (when (fboundp 'icomplete-vertical-goto-last)
-    (advice-add 'icomplete-vertical-goto-last :after #'nano/org-roam--fido-mark-navigated)))
+    (advice-add 'icomplete-vertical-goto-last :override
+                (lambda ()
+                  (interactive)
+                  (if (nano/org-roam--fido-in-roam-p)
+                      (while (nano/org-roam--fido-nav-back))
+                    (while (icomplete-backward-completions))))))
+  ;; C-s/C-r fall back to the vertical-mode menu items (fido-vertical
+  ;; disables them); C-n/C-p/arrows bind the same forward/backward
+  ;; commands in `icomplete-vertical-mode-minibuffer-map', so the two
+  ;; :override advices cover every nav key automatically.
+  )
 (add-hook 'minibuffer-setup-hook #'nano/org-roam--fido-setup)
 
 
