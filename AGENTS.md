@@ -68,6 +68,17 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 - Handlers are registered at init (`with-eval-after-load 'desktop`), **not** from `magit-mode-hook`/`with-eval-after-load 'magit`: `desktop-read` runs from `after-init-hook` before magit loads, and `desktop-load-file` loads magit only when it reaches the first magit entry — after that entry's handler lookup. Registering late drops exactly one magit buffer per session ("1 failed to restore").
 - A magit buffer whose repository directory is gone is skipped (nil from the handler, placeholder shown); binding a nonexistent `default-directory` would signal and abort the whole restore.
 
+## Roam completion DWIM (21d)
+- `, r f` / `org-roam-node-find` prompts run through fido-vertical with custom RET/TAB/nav semantics (Spacemacs/vertico contract):
+  - The candidate list is a PASSIVE menu. The first entry being highlighted is a "ghost" — plain RET submits the TYPED literal (creates a new node, or opens an exact-title match). It does NOT coerce to the highlighted candidate.
+  - Navigation (C-j/C-k, C-n/C-p, arrows, M-</M->) actively selects: each press rotates `completion-all-sorted-completions` from the TOP (stateless rebuild in `nano/org-roam--fido-nav`/`-nav-back`, :override advice on `icomplete-forward/backward-completions`), and sets buffer-local `nano/org-roam--fido-navigated`.
+  - RET after navigation force-completes the focused candidate (`icomplete-force-complete-and-exit`), then clears the flag.
+  - TAB (`nano/icomplete-fido-tab-dwim`) fills the input with the focused candidate as a PREVIEW (`minibuffer-force-complete`) but never selects: the following RET still exits with the typed literal unless the user navigates again. Non-roam prompts: stock `minibuffer-complete`.
+  - C-M-j keeps stock force-select-first. Non-roam prompts: RET/TAB fall back to stock `icomplete-fido-ret`/`minibuffer-complete` (DWIM delegates).
+- Why :override on the icomplete nav commands instead of :after: stock icomplete auto-focuses entry 1 on every refilter; the movers must ignore the stale rotation and always step from the fresh top (vertico behaviour).
+- nav-back guards the single-candidate case (no rotation, no list duplication) and conses `(car (last comps))` onto `(butlast comps)` — consing onto the full list duplicated the tail into the cache.
+- Plain RET is `exit-minibuffer`, NOT `minibuffer-complete-and-exit`: the latter expands a novel prefix to the first flex match on first RET (forces an existing node), defeating new-node creation.
+
 ## Workflow
 - Add a package: add `(straight-use-package '(pkg :type git :host github :repo "user/pkg"))` + `(require 'pkg)` in `init.el`.
 - Edited a vendored package under `straight/repos/`? `M-x straight-rebuild-package RET <pkg>`, or `M-x straight-pull-all` to sync upstream.
