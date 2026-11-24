@@ -19,7 +19,8 @@
 ;;   §7  Theme toggle + persistence + spacemacs-light/nord-dark faces  (SPC t n)
 ;;   §8  Completion  (built-in icomplete-vertical, helm-like list)
 ;;   §9  Workspace  (built-in tab-bar, SPC l, name in modeline; §9c quad)
-;;   §10 Git  (magit + delta + blame transient, SPC g; §10c magit in desktop)
+;;   §10 Git  (magit + delta + blame transient, SPC g)
+;;   §10c Magit buffers in the desktop session  (restart keeps them real)
 ;;   §11 Project  (built-in project.el, SPC p)
 ;;   §12 Search  (ripgrep via built-in project+xref, SPC s)
 ;;   §13 File sync  (built-in auto-revert, SPC b R fallback)
@@ -39,6 +40,7 @@
 ;;   §27  OpenCode v2  (jdormit/emacs-opencode, SPC a c, lazy;
 ;;                        default model = nano/opencode-default-model, 27d;
 ;;                        session minimap on SPC a c l, 27i)
+;;   §27i Session minimap  (SPC a c l, read-only roster)
 ;;   §28  Indentation  (global 2 spaces, Python 4)
 ;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
 ;;   §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
@@ -228,9 +230,7 @@
   "SPC s" "search"
   "SPC h" "help"
   "SPC t" "toggle"
-  "SPC i" "insert"
   "SPC a" "apps"
-  "SPC v" "expand region"
   "SPC o" "org-mode"
   "SPC a w" "web"
   "SPC z" "zoom"
@@ -241,7 +241,10 @@
 ;; §5  Leader keybindings
 ;; ---------------------------------------------------------------------
 ;; Mnemonic groups: file, buffer, window, quit, search.
-;; Edit here to add new SPC bindings.  Keep sorted by group for scanability.
+;; These are the cross-cutting keys only.  Feature keys are bound in the
+;; section that owns the feature (~100 of the ~140 leader keys: opencode
+;; §27, elfeed §23, roam §21, ement §31, ...).  Add a new feature key next
+;; to its implementation and register its which-key label there.
 ;; Note: SPC w 2 / SPC w 3 live in §6 (window mgmt).
 
 ;; 5a. File  (SPC f)
@@ -1597,8 +1600,10 @@ Guards org/outline faces before their libraries load."
       (nano/set-face-maybe 'org-todo :foreground (funcall g 'war) :background (funcall g 'yellow-bg) :weight 'bold)
       (nano/set-face-maybe 'org-done :foreground (funcall g 'suc) :background (funcall g 'green-bg) :weight 'bold)
       (nano/set-face-maybe 'org-block :foreground (funcall g 'cblk) :background (funcall g 'cblk-bg) :extend t)
-      (nano/set-face-maybe 'org-block-begin-line :foreground (funcall g 'cblk-ln) :background (funcall g 'cblk-ln-bg) :extend t)
-      (nano/set-face-maybe 'org-block-end-line :foreground (funcall g 'cblk-ln) :background (funcall g 'cblk-ln-bg) :extend t)
+      (nano/set-face-maybe 'org-block-begin-line :foreground (funcall g 'cblk-ln) :background (funcall g 'cblk-ln-bg)
+        :extend t)
+      (nano/set-face-maybe 'org-block-end-line :foreground (funcall g 'cblk-ln) :background (funcall g 'cblk-ln-bg)
+        :extend t)
       (nano/set-face-maybe 'org-tag :foreground (funcall g 'meta))
       (nano/set-face-maybe 'org-special-keyword :foreground (funcall g 'func))
       (nano/set-face-maybe 'org-meta-line :foreground (funcall g 'meta))
@@ -1609,7 +1614,8 @@ Guards org/outline faces before their libraries load."
 Installed :after `nano-refresh-theme'.  No-op when dark."
   (when (and (boundp 'nano-theme-var) (string= nano-theme-var "light"))
     (let ((g (lambda (k) (cdr (assq k nano/spacemacs-light-palette)))))
-      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg) :slant 'normal :weight 'regular)
+      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg)
+        :slant 'normal :weight 'regular)
       (nano/set-face-maybe 'font-lock-doc-face :foreground (funcall g 'meta) :weight 'regular)
       (nano/set-face-maybe 'font-lock-string-face :foreground (funcall g 'str))
       (nano/set-face-maybe 'font-lock-keyword-face :foreground (funcall g 'keyword) :weight 'bold)
@@ -1665,7 +1671,8 @@ Installed :after `nano-refresh-theme' (after §7c breakout so vendored
       (nano/set-face-maybe 'org-todo :foreground (funcall g 'war) :background (funcall g 'subtle) :weight 'bold)
       (nano/set-face-maybe 'org-done :foreground (funcall g 'str) :background (funcall g 'comment-bg) :weight 'bold)
       (nano/set-face-maybe 'org-block :foreground (funcall g 'keyword) :background (funcall g 'comment-bg) :extend t)
-      (nano/set-face-maybe 'org-block-begin-line :foreground (funcall g 'type) :background (funcall g 'subtle) :extend t)
+      (nano/set-face-maybe 'org-block-begin-line :foreground (funcall g 'type) :background (funcall g 'subtle)
+        :extend t)
       (nano/set-face-maybe 'org-block-end-line :foreground (funcall g 'type) :background (funcall g 'subtle) :extend t)
       (nano/set-face-maybe 'org-tag :foreground (funcall g 'doc))
       (nano/set-face-maybe 'org-special-keyword :foreground (funcall g 'type))
@@ -1677,7 +1684,8 @@ Installed :after `nano-refresh-theme' (after §7c breakout so vendored
 Installed :after `nano-refresh-theme'.  No-op when light."
   (when (and (boundp 'nano-theme-var) (string= nano-theme-var "dark"))
     (let ((g (lambda (k) (cdr (assq k nano/nord-dark-palette)))))
-      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg) :slant 'normal :weight 'light)
+      (nano/set-face-maybe 'font-lock-comment-face :foreground (funcall g 'comment) :background (funcall g 'comment-bg)
+        :slant 'normal :weight 'light)
       (nano/set-face-maybe 'font-lock-doc-face :foreground (funcall g 'doc))
       (nano/set-face-maybe 'font-lock-string-face :foreground (funcall g 'str))
       (nano/set-face-maybe 'font-lock-keyword-face :foreground (funcall g 'keyword) :weight 'bold)
@@ -3374,9 +3382,21 @@ Focus follows to target."
     "Non-nil when on org link via element or face (font-lock off safe)."
     (or (ignore-errors (nano/org-at-link-p))
         (nano/org-link-face-p)))
+  ;; Modern nadvice, not `defadvice': the old form was the last deprecated
+  ;; API in this file (obsolete since 30.1), contradicting §2b2 which
+  ;; already claimed it was gone.  `ad-do-it' -> `(apply orig args)'.
+  ;;
+  ;; NOTE: `org-autolist-mode' runs from `org-mode-hook' in every org
+  ;; buffer and calls `ad-activate', which re-enables upstream's own
+  ;; legacy around-advice even after the `ad-deactivate' below.  That is
+  ;; harmless HERE only because every list branch handles the keypress
+  ;; itself and never calls ORIG, so upstream never gets a second turn.
+  ;; Do not add `(apply orig args)' to a list branch: it double-inserts.
   (ad-deactivate 'org-return)
-  (defadvice org-return (around nano/org-autolist-return)
+  (defun nano/org-autolist-return (orig &rest args)
     "Autolist with link-face fix: follow link when on one, even in lists.
+ORIG is the real `org-return'; ARGS forwards its optional arguments
+\(indent, arg, interactive) so `SPC RET' and programmatic calls work.
 External `file:'/`id:' links relocate to `*scratch*' window via
 open-then-move (link context stays in origin); scratch invisible
 → current window via `file . find-file' shadow; elfeed untouched."
@@ -3411,17 +3431,18 @@ open-then-move (link context stays in origin); scratch invisible
               (if (not (nano/scratch-target-usable-p target origin))
                   (let ((org-link-frame-setup (cons '(file . find-file)
                                                     org-link-frame-setup)))
-                    ad-do-it)
+                    (apply orig args))
                 (let ((origin-buf (window-buffer origin))
                       (shown-before (mapcar (lambda (w) (cons w (window-buffer w)))
                                             (window-list nil nil))))
                   ;; Guard: §6f advice suppressed; outer move owns relocation.
                   (let ((nano/scratch-redirect-in-progress t))
-                    ad-do-it)
+                    (apply orig args))
                   (nano/move-opened-buffer-to-target
                    origin target origin-buf shown-before))))
-          ad-do-it))))
-  (ad-activate 'org-return))
+          (apply orig args)))))
+  (advice-add 'org-return :around #'nano/org-autolist-return
+              '((name . nano/org-autolist-return))))
 
 (with-eval-after-load 'org
   ;; Folded open: overview shows level-1 headers only.
