@@ -42,6 +42,7 @@
 ;;   §28  Indentation  (global 2 spaces, Python 4)
 ;;   §29  Shell  (builtins, SPC ' + SPC a t, lazy)
 ;;   §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
+;;   §31  Matrix chat  (alphapapa/ement.el, SPC a m, lazy; no E2EE)
 ;; =====================================================================
 
 
@@ -5935,6 +5936,126 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
 (define-key spacemacs-leader-map (kbd "a t g") 'ghostel)
 (which-key-add-key-based-replacements
   "SPC a t g" "ghostel")
+
+;; ---------------------------------------------------------------------
+;; §31  Matrix chat  (alphapapa/ement.el, SPC a m, lazy)
+;; ---------------------------------------------------------------------
+;; Client: ement.el (GNU ELPA, recipe already in straight's local
+;; gnu-elpa-mirror clone -> fetched from github.com/emacs-straight/ement).
+;; No package.el (early-init.el), so straight is the only installer.
+;; `straight-use-package' below BUILDS at init, like every other §N
+;; package here — the first launch after this line is added clones and
+;; byte-compiles ement plus its deps (map, persist, taxy,
+;; taxy-magit-section, svg-lib; plz and transient were already built),
+;; which costs ~30s and needs network ONCE.  What stays lazy is the
+;; feature `require': no ement code runs until a SPC a m key is pressed.
+;;
+;; E2EE: none natively.  Encrypted rooms need either a proxy
+;; (bhwdev/ement-e2ee, matrix-sdk-crypto based) or Pantalaimon (archived
+;; 2025-06, libolm).  Not installed; plain-text rooms work out of the box.
+;;
+;; Why the wrappers: only `ement-connect' / `ement-room-list' /
+;; `ement-directory' carry `;;;###autoload' cookies; the rest are NOT
+;; autoloaded, so a direct `define-key' to them would be void-function
+;; until something else loaded ement.  `nano/ement-command' below makes
+;; each binding a named command that requires the owning feature first,
+;; then calls the real command interactively (keeps `this-command',
+;; prefix args, and which-key names).
+;;
+;; Evil: evil-collection ships modes/ement/ (already cloned here).  Added
+;; to `evil-collection-mode-list' so the collection's deferred setup runs
+;; on first ement load; §10's `nano/evil-collection-ensure' then covers it
+;; like magit/elfeed.  Initial state seeded explicitly to normal for the
+;; same reason §10/§23 do it: ement's modes derive from fundamental-mode /
+;; magit-section-mode and would otherwise land in emacs state, dead keys.
+;; Ement binds SPC to scroll-up-mark-read in `ement-room-mode-map'; the
+;; evil state map's SPC (the leader) wins, so SPC opens the leader inside
+;; room buffers — scroll with C-d/C-u or S-SPC there.
+(straight-use-package 'ement)
+
+(defmacro nano/ement-command (name feature command docstring)
+  "Define NAME as a lazy entry for Ement's COMMAND.
+FEATURE is required first.  NAME stays a real named command so
+which-key and `describe-key' report something readable."
+  (declare (indent 3) (doc-string 4))
+  `(defun ,name ()
+     ,docstring
+     (interactive)
+     (require ,feature)
+     (call-interactively ,command)))
+
+(nano/ement-command nano/ement-connect 'ement #'ement-connect
+  "Connect to Matrix (prompts for account on first use).  SPC a m c.")
+(nano/ement-command nano/ement-disconnect 'ement #'ement-disconnect
+  "Disconnect from the current Matrix session.  SPC a m x.")
+(nano/ement-command nano/ement-kill-buffers 'ement #'ement-kill-buffers
+  "Kill every Ement buffer, keeping the connection.  SPC a m k.")
+(nano/ement-command nano/ement-room-list 'ement-room-list #'ement-room-list
+  "Show the joined-rooms list.  SPC a m l.")
+(nano/ement-command nano/ement-view-room 'ement #'ement-view-room
+  "Switch to a room buffer, choosing the room.  SPC a m v.")
+(nano/ement-command nano/ement-join-room 'ement #'ement-join-room
+  "Join a room by ID or alias (\"#alias:server\").  SPC a m j.")
+(nano/ement-command nano/ement-direct-message 'ement #'ement-send-direct-message
+  "Send a direct message to a user (reuses/creates the DM room).  SPC a m d.")
+(nano/ement-command nano/ement-directory 'ement-directory #'ement-directory
+  "Browse the public room directory.  SPC a m p.")
+(nano/ement-command nano/ement-directory-search 'ement-directory #'ement-directory-search
+  "Search the public room directory.  SPC a m s.")
+(nano/ement-command nano/ement-mentions 'ement #'ement-notify-switch-to-mentions-buffer
+  "Jump to the *Ement Mentions* buffer.  SPC a m m.")
+(nano/ement-command nano/ement-notifications 'ement #'ement-notify-switch-to-notifications-buffer
+  "Jump to the *Ement Notifications* buffer.  SPC a m n.")
+
+(define-key spacemacs-leader-map (kbd "a m c") 'nano/ement-connect)
+(define-key spacemacs-leader-map (kbd "a m x") 'nano/ement-disconnect)
+(define-key spacemacs-leader-map (kbd "a m k") 'nano/ement-kill-buffers)
+(define-key spacemacs-leader-map (kbd "a m l") 'nano/ement-room-list)
+(define-key spacemacs-leader-map (kbd "a m v") 'nano/ement-view-room)
+(define-key spacemacs-leader-map (kbd "a m j") 'nano/ement-join-room)
+(define-key spacemacs-leader-map (kbd "a m d") 'nano/ement-direct-message)
+(define-key spacemacs-leader-map (kbd "a m p") 'nano/ement-directory)
+(define-key spacemacs-leader-map (kbd "a m s") 'nano/ement-directory-search)
+(define-key spacemacs-leader-map (kbd "a m m") 'nano/ement-mentions)
+(define-key spacemacs-leader-map (kbd "a m n") 'nano/ement-notifications)
+(which-key-add-key-based-replacements
+  "SPC a m" "matrix"
+  "SPC a m c" "connect"
+  "SPC a m x" "disconnect"
+  "SPC a m k" "kill buffers"
+  "SPC a m l" "room list"
+  "SPC a m v" "view room"
+  "SPC a m j" "join room"
+  "SPC a m d" "direct message"
+  "SPC a m p" "room directory"
+  "SPC a m s" "directory search"
+  "SPC a m m" "mentions"
+  "SPC a m n" "notifications")
+
+;; evil-collection: opt in (one symbol).  Loaded at init time, before the
+;; first `nano/evil-collection-ensure' call, so the deferred
+;; `with-eval-after-load' for ement is registered in time.
+(add-to-list 'evil-collection-mode-list 'ement)
+
+;; §10's ensure only fires on magit/elfeed load; Ement can be the first
+;; package touched in a session, so give it its own trigger.  Calling it
+;; twice is a no-op (`nano/evil-collection-initialized').
+(with-eval-after-load 'ement (nano/evil-collection-ensure))
+
+;; Explicit normal state for ement's modes (see header note).  These
+;; derive from fundamental-mode / magit-section-mode, which evil leaves in
+;; emacs state, so without this the collection's normal-state bindings are
+;; dead on first open.  ement-room buffers are read-only history plus
+;; single-key editing verbs, so normal is the right base: j/k/n/p motion,
+;; `a' write, `i' edit message (all from evil-collection-ement).
+;; Runs at init (evil is already loaded, §3), so it lands before any
+;; ement buffer exists and is not undone by the collection's own setup
+;; (which never calls `evil-set-initial-state').
+(with-eval-after-load 'evil
+  (dolist (m '(ement-room-mode ement-notifications-mode
+               ement-room-list-mode ement-directory-mode
+               ement-describe-room-mode))
+    (evil-set-initial-state m 'normal)))
 
 ;;; init.el ends here
 (custom-set-variables

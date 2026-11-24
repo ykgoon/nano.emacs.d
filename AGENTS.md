@@ -59,6 +59,16 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 - Starts in evil insert state (like §29 shells). Shell integration (OSC 7 directory tracking, OSC 133 prompt nav) is injected for bash/zsh/fish automatically, no rc edits.
 - `evil-ghostel` (same repo, MELPA) is available but not installed; it maps vim operators onto the PTY.
 
+## Matrix chat (§31)
+- `SPC a m` = ement.el (`alphapapa/ement.el`, GNU ELPA via straight's gnu-elpa-mirror clone). Keys: `c` connect / `x` disconnect / `k` kill buffers / `l` room list / `v` view room / `j` join / `d` direct message / `p` directory / `s` directory search / `m` mentions / `n` notifications.
+- ement is lazy: `straight-use-package` only registers the recipe. Only `ement-connect`, `ement-room-list`, `ement-directory` carry autoload cookies; the rest (`ement-view-room`, `ement-room-join`, `ement-send-direct-message`, `ement-notify-switch-to-*`) do NOT. Each key therefore goes through a `nano/ement-command` wrapper (macro in §31) that `require`s the owning feature then `call-interactively`s the real command — binding the raw symbol would be void-function until something else loaded ement, and a lambda would lose which-key/`describe-key` names.
+- No E2EE. Encrypted rooms are unreadable without a proxy: `bhwdev/ement-e2ee` (matrix-sdk-crypto/vodozemac, prebuilt binaries) or Pantalaimon (archived 2025-06, libolm). Neither is installed.
+- **SPC is the leader inside room buffers.** ement binds `SPC` to `ement-room-scroll-up-mark-read` in `ement-room-mode-map`, but the evil normal-state map shadows it, so `SPC` opens the leader. Scroll with `C-d`/`C-u` or `S-SPC`; `?` (or `<`) opens ement's transient menu.
+- Evil integration is evil-collection's `modes/ement/` (already vendored). Two things are required and easy to lose: (1) `ement` must be in `evil-collection-mode-list` — §31 `add-to-list`s it; (2) ement's modes derive from `fundamental-mode`/`magit-section-mode`, so they land in emacs state unless seeded — §31 `evil-set-initial-state`s all five to `normal` at init.
+- §10's `nano/evil-collection-ensure` only triggers on magit/elfeed load, so §31 adds its own `(with-eval-after-load 'ement (nano/evil-collection-ensure))`. Calling it twice is a no-op guard on `nano/evil-collection-initialized`.
+- First `SPC a m c` clones and builds ement plus `map`, `persist`, `taxy`, `taxy-magit-section`, `svg-lib` (~30s, needs network). `plz` and `transient` were already built for other packages.
+- Room list / directory / describe buffers are `magit-section`-derived, so §10c/§6 window routing and the magit `M-0..M-9` winum rebind matter there too.
+
 ## Session restore (§5d + §10c)
 - `SPC q q` / `SPC q r` save to `var/desktop/.emacs.desktop`: every tab (workspace) with its name, each tab's window layout, every file buffer, and — since §10c — every magit buffer. `tab-bar` must be on before `desktop-save-mode` reads, else framesets come back without tabs.
 - `desktop-load-locked-desktop` is `'check-pid`, not nil: a lock left by a crash/kill is ignored once that PID is gone, while a live second Emacs still refuses. With nil, one crash silently emptied the next session ("Desktop file in use; not loaded").
