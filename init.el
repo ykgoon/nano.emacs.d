@@ -127,10 +127,12 @@
 (require 'nano)
 
 ;; 2b2. Upstream modernization — replaces vendored nano-defaults.el edits.
-;;      `default-major-mode' obsolete since 23, `defadvice' since 30.1,
-;;      bare `(temp-buffer-resize-mode)' toggles instead of enabling.
+;;      `default-major-mode' obsolete since 23, bare
+;;      `(temp-buffer-resize-mode)' toggles instead of enabling.
 ;;      `nano-command.el' point-at-bol/eol aliases still functional and
 ;;      warnings suppressed in §1 — no override needed, dropped.
+;;      (No `defadvice' left anywhere in this file as of the Tier-1
+;;      refactor; §18b3 was the last one.)
 (with-eval-after-load 'nano-defaults
   (setq-default major-mode 'text-mode)
   ;; Scratch defaults to org-mode (autoloaded, no eager require).
