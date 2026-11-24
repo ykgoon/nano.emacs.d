@@ -4112,21 +4112,30 @@ With prefix ARG, also copy to kill-ring + clipboard."
 ;;      Spacemacs/vertico semantics (emulated):
 ;;        * the list is a passive menu: RET always submits the TYPED
 ;;          input (new node, or exact existing title);
-;;        * moving into the list (C-j/C-k/C-n/C-p/arrows/M-</M->)
-;;          actively selects the focused candidate;
+;;        * moving into the list (C-j/C-k/C-n/C-p/arrows)
+;;          actively selects the focused candidate (M-</M-> also map to
+;;          nav, but stay stock — see the advice note below);
 ;;        * TAB fills the input with the currently focused candidate
 ;;          (preview) WITHOUT selecting it — after TAB, RET still
 ;;          creates/uses the literal text unless the user navigates
 ;;          again (navigation re-arms selection);
 ;;        * C-M-j keeps stock "force select first".
 ;;      Implementation: selection state is NOT the icomplete rotation
-;;      (which auto-focuses entry 1 on every keystroke).  Nav commands
-;;      are advised :override for roam prompts with a
-;;      selectrum/vertico-style mover that rebuilds the rotation from
-;;      scratch each time (stateless), so a later refilter restarts at
-;;      the top again.  RET and TAB are plain DWIM commands bound in
-;;      `icomplete-fido-mode-map', delegating to stock behaviour for
-;;      non-roam prompts (same pattern as RET, no transient maps).
+;;      (which auto-focuses entry 1 on every keystroke).  For roam
+;;      prompts the nav commands are replaced by a selectrum/vertico-
+;;      style mover that rebuilds the rotation from scratch each time
+;;      (stateless), so a later refilter restarts at the top again.  RET
+;;      and TAB are plain DWIM commands bound in `icomplete-fido-mode-map',
+;;      delegating to stock behaviour for non-roam prompts.
+;;
+;;      The nav hook MUST be `:around', never `:override'.  These two
+;;      commands are what C-n/C-p and <down>/<up> are bound to for EVERY
+;;      prompt, so the non-roam branch has to reach the original: an
+;;      `:override' advice that "falls back" by calling
+;;      `icomplete-forward-completions' calls itself, and the first
+;;      up/down in any file/choice prompt dies with
+;;      `excessive-lisp-nesting' (1601).  `:around' passes the real
+;;      original in as ORIG, which cannot re-enter.
 ;;      NOTE: plain RET must be `exit-minibuffer', NOT
 ;;      `minibuffer-complete-and-exit' — the latter expands a new
 ;;      prefix to the first flex match on first RET (still forces
@@ -4163,41 +4172,45 @@ base 0, and force-complete recomputes when the cache is nil)."
     (nreverse out)))
 
 (defun nano/org-roam--fido-nav ()
-  "Selectrum/vertico-style candidate movement for roam prompts.
-Ignore any stale icomplete rotation state and always advance from
-the FIRST candidate of the freshly filtered list, so the
-highlighted entry moves down one step per invocation (wrapping at
-the end).  Non-roam minibuffers fall back to stock behaviour."
+  "Advance the roam candidate highlight one step (wrapping at the end).
+Ignore any stale icomplete rotation and rebuild from the CURRENT
+list, so each invocation moves exactly one entry.  Returns non-nil
+when a rotation happened (stock contract), nil with <2 candidates.
+ROAM ONLY — the advice below routes non-roam prompts to the real
+stock command, so this must never call `icomplete-forward-completions'
+(a call to it here would re-enter the advice and recurse)."
   (interactive)
-  (if (not (nano/org-roam--fido-in-roam-p))
-      (icomplete-forward-completions)
-    (let* ((beg (icomplete--field-beg))
-           (end (icomplete--field-end))
-           (comps (nano/org-roam--fido-proper
-                   (completion-all-sorted-completions beg end))))
-      (when (consp comps)
-        (completion--cache-all-sorted-completions
-         beg end
-         (nconc (cdr comps) (list (car comps)))))
-      (nano/org-roam--fido-mark-navigated))))
+  (let* ((beg (icomplete--field-beg))
+         (end (icomplete--field-end))
+         (comps (nano/org-roam--fido-proper
+                 (completion-all-sorted-completions beg end)))
+         (stepped nil))
+    (when (consp (cdr comps))
+      (completion--cache-all-sorted-completions
+       beg end
+       (nconc (cdr comps) (list (car comps))))
+      (setq stepped t))
+    (nano/org-roam--fido-mark-navigated)
+    stepped))
 
 (defun nano/org-roam--fido-nav-back ()
-  "Backward variant of `nano/org-roam--fido-nav'."
+  "Backward variant of `nano/org-roam--fido-nav'.  ROAM ONLY."
   (interactive)
-  (if (not (nano/org-roam--fido-in-roam-p))
-      (icomplete-backward-completions)
-    (let* ((beg (icomplete--field-beg))
-           (end (icomplete--field-end))
-           (comps (nano/org-roam--fido-proper
-                   (completion-all-sorted-completions beg end))))
-      ;; Rotate only when >= 2 candidates: consing the last element of
-      ;; a single-entry list onto itself would DUPLICATE it in the
-      ;; cache (a a) and RET would then force-complete a doubled title.
-      (when (and (consp comps) (consp (cdr comps)))
-        (completion--cache-all-sorted-completions
-         beg end
-         (cons (car (last comps)) (butlast comps))))
-      (nano/org-roam--fido-mark-navigated))))
+  (let* ((beg (icomplete--field-beg))
+         (end (icomplete--field-end))
+         (comps (nano/org-roam--fido-proper
+                 (completion-all-sorted-completions beg end)))
+         (stepped nil))
+    ;; Rotate only when >= 2 candidates: consing the last element of
+    ;; a single-entry list onto itself would DUPLICATE it in the
+    ;; cache (a a) and RET would then force-complete a doubled title.
+    (when (and (consp comps) (consp (cdr comps)))
+      (completion--cache-all-sorted-completions
+       beg end
+       (cons (car (last comps)) (butlast comps)))
+      (setq stepped t))
+    (nano/org-roam--fido-mark-navigated)
+    stepped))
 
 (defun nano/icomplete-fido-ret-roam-dwim ()
   "RET DWIM for roam: literal (new node) unless navigated.
@@ -4225,6 +4238,20 @@ minibuffers fall back to `minibuffer-complete'."
       (minibuffer-force-complete nil nil 'dont-cycle)
     (minibuffer-complete)))
 
+(defun nano/org-roam--icomplete-nav-a (orig &rest args)
+  "Route forward nav: roam gets the stateless mover, the rest stock.
+ORIG is the real `icomplete-forward-completions' bound by the
+:around advice, so the non-roam branch cannot re-enter this advice."
+  (if (nano/org-roam--fido-in-roam-p)
+      (nano/org-roam--fido-nav)
+    (apply orig args)))
+
+(defun nano/org-roam--icomplete-nav-back-a (orig &rest args)
+  "Route backward nav: roam gets the stateless mover, the rest stock."
+  (if (nano/org-roam--fido-in-roam-p)
+      (nano/org-roam--fido-nav-back)
+    (apply orig args)))
+
 (with-eval-after-load 'icomplete
   ;; DWIM commands in the fido map (harmless in non-roam prompts: they
   ;; delegate to stock behaviour there).  TAB: stock fido leaves TAB to
@@ -4233,27 +4260,27 @@ minibuffers fall back to `minibuffer-complete'."
   (define-key icomplete-fido-mode-map (kbd "RET") #'nano/icomplete-fido-ret-roam-dwim)
   (define-key icomplete-fido-mode-map (kbd "C-m") #'nano/icomplete-fido-ret-roam-dwim)
   (define-key icomplete-fido-mode-map (kbd "TAB") #'nano/icomplete-fido-tab-dwim)
-  ;; Nav: :override for roam prompts only (delegates to stock elsewhere).
-  (advice-add 'icomplete-forward-completions :override #'nano/org-roam--fido-nav)
-  (advice-add 'icomplete-backward-completions :override #'nano/org-roam--fido-nav-back)
-  (when (fboundp 'icomplete-vertical-goto-first)
-    (advice-add 'icomplete-vertical-goto-first :override
-                (lambda ()
-                  (interactive)
-                  (if (nano/org-roam--fido-in-roam-p)
-                      (while (nano/org-roam--fido-nav))
-                    (while (icomplete-forward-completions))))))
-  (when (fboundp 'icomplete-vertical-goto-last)
-    (advice-add 'icomplete-vertical-goto-last :override
-                (lambda ()
-                  (interactive)
-                  (if (nano/org-roam--fido-in-roam-p)
-                      (while (nano/org-roam--fido-nav-back))
-                    (while (icomplete-backward-completions))))))
-  ;; C-s/C-r fall back to the vertical-mode menu items (fido-vertical
-  ;; disables them); C-n/C-p/arrows bind the same forward/backward
-  ;; commands in `icomplete-vertical-mode-minibuffer-map', so the two
-  ;; :override advices cover every nav key automatically.
+  ;; Nav: :around, NOT :override.  These commands are what C-n/C-p and
+  ;; <down>/<up> are bound to in `icomplete-vertical-mode-minibuffer-map',
+  ;; so they run in EVERY completion prompt, not just roam.  With
+  ;; :override the "fall back to stock" branch called the very symbol the
+  ;; advice had replaced, i.e. itself: any up/down in any prompt recursed
+  ;; until `excessive-lisp-nesting' (1601).  :around hands the real
+  ;; original in as ORIG, so the non-roam path cannot re-enter.
+  (advice-add 'icomplete-forward-completions :around
+              #'nano/org-roam--icomplete-nav-a
+              '((name . nano/org-roam--icomplete-nav)))
+  (advice-add 'icomplete-backward-completions :around
+              #'nano/org-roam--icomplete-nav-back-a
+              '((name . nano/org-roam--icomplete-nav-back)))
+  ;; M-</M-> (`icomplete-vertical-goto-first'/`-last') are NOT advised:
+  ;; their stock bodies are `(while (icomplete-backward-completions))',
+  ;; which relies on `icomplete-scroll' to terminate.  `icomplete-scroll'
+  ;; is nil here, so a rotation-based replacement can never know when it
+  ;; has reached the first entry and would spin forever.  Stock therefore
+  ;; signals "Only works with `icomplete-scroll'" on M-< / M->, which is
+  ;; the honest behaviour for this config; C-j/C-k and the arrows do the
+  ;; stepping.
   )
 (add-hook 'minibuffer-setup-hook #'nano/org-roam--fido-setup)
 
