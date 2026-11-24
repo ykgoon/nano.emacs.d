@@ -213,6 +213,38 @@
 ;; Spacemacs-style mnemonic SPC leader using a single prefix map.
 ;; Bound in evil normal/visual/motion + global C-SPC for insert/emacs state.
 ;; which-key labels give discoverable "file / buffer / window ..." hints.
+;; 4a. Binding helper — one form per key, label inline.
+;;
+;; Before this, every feature key needed TWO forms listing the same key
+;; twice (a `define-key' plus a `which-key-add-key-based-replacements'
+;; pair with a hand-written "SPC " prefix and quote escaping). With ~140
+;; leader keys that is the single largest source of duplication in this
+;; file, and a typo in either copy silently desyncs the key from its
+;; label.  `nano/leader-keys' takes (KEY COMMAND "label") triples and
+;; emits both, so the key appears exactly once.
+;;
+;; The label regex is built by `which-key-add-key-based-replacements'
+;; itself from the "SPC KEY" string, so callers pass the bare key.
+(defmacro nano/leader-keys (&rest bindings)
+  "Bind leader KEYs to COMMANDs with optional which-key labels.
+Each BINDING is (KEY COMMAND) or (KEY COMMAND \"LABEL\").  KEY is a
+`kbd' string without the SPC prefix (\"a m c\"), COMMAND a symbol.
+KEY nil skips the binding (handy to keep a key reserved/absent)."
+  (declare (indent 0))
+  `(progn
+     ,@(mapcar
+        (lambda (b)
+          (let ((key (nth 0 b))
+                (cmd (nth 1 b))
+                (label (nth 2 b)))
+            `(progn
+               ,(when key
+                  `(define-key spacemacs-leader-map (kbd ,key) ,cmd))
+               ,(when (and key label)
+                  `(which-key-add-key-based-replacements
+                     (concat "SPC " ,key) ,label)))))
+        bindings)))
+
 (define-prefix-command 'spacemacs-leader-map)
 (define-key evil-normal-state-map (kbd "SPC") spacemacs-leader-map)
 (define-key evil-visual-state-map (kbd "SPC") spacemacs-leader-map)
@@ -248,8 +280,9 @@
 ;; Note: SPC w 2 / SPC w 3 live in §6 (window mgmt).
 
 ;; 5a. File  (SPC f)
-(define-key spacemacs-leader-map (kbd "SPC") 'execute-extended-command) ; SPC SPC → M-x
-(define-key spacemacs-leader-map (kbd ":") 'execute-extended-command)   ; SPC :   → M-x (Spacemacs compat)
+(nano/leader-keys
+  ("SPC" 'execute-extended-command nil) ; SPC SPC -> M-x
+  (":"   'execute-extended-command nil)) ; Spacemacs compat
 (define-key spacemacs-leader-map (kbd "f f") 'find-file)
 (define-key spacemacs-leader-map (kbd "f s") 'save-buffer)
 (define-key spacemacs-leader-map (kbd "f S") 'evil-write-all) ; Spacemacs parity (:wa, silent, no prompt)
@@ -470,25 +503,19 @@ Overwrites after confirm.  Errors when buffer visits no file."
   "SPC f y c" "path with line+col")
 
 ;; 5b. Buffer  (SPC b)
-(define-key spacemacs-leader-map (kbd "TAB") 'mode-line-other-buffer)
-(define-key spacemacs-leader-map (kbd "b b") 'switch-to-buffer)
-(define-key spacemacs-leader-map (kbd "b d") 'kill-current-buffer)
-(define-key spacemacs-leader-map (kbd "b D") 'kill-matching-buffers)
-(define-key spacemacs-leader-map (kbd "b e") 'erase-buffer)
-(define-key spacemacs-leader-map (kbd "b n") 'next-buffer)
-(define-key spacemacs-leader-map (kbd "b p") 'previous-buffer)
-(define-key spacemacs-leader-map (kbd "b R") 'revert-buffer)
-(define-key spacemacs-leader-map (kbd "b s") 'nano/switch-to-scratch-buffer)
-(define-key spacemacs-leader-map (kbd "b w") 'read-only-mode)
-(define-key spacemacs-leader-map (kbd "b Y") 'nano/copy-whole-buffer-to-clipboard)
-(which-key-add-key-based-replacements
-  "SPC TAB" "last buffer"
-  "SPC b D" "kill buffers by pattern"
-  "SPC b R" "revert buffer"
-  "SPC b e" "erase buffer"
-  "SPC b s" "scratch buffer"
-  "SPC b w" "toggle read-only"
-  "SPC b Y" "copy buffer")
+(nano/leader-keys
+  ;; Unlabelled keys keep relying on which-key's command-name fallback.
+  ("TAB"   'mode-line-other-buffer              "last buffer")
+  ("b b"   'switch-to-buffer                    nil)
+  ("b d"   'kill-current-buffer                 nil)
+  ("b D"   'kill-matching-buffers               "kill buffers by pattern")
+  ("b e"   'erase-buffer                        "erase buffer")
+  ("b n"   'next-buffer                         nil)
+  ("b p"   'previous-buffer                     nil)
+  ("b R"   'revert-buffer                       "revert buffer")
+  ("b s"   'nano/switch-to-scratch-buffer       "scratch buffer")
+  ("b w"   'read-only-mode                      "toggle read-only")
+  ("b Y"   'nano/copy-whole-buffer-to-clipboard "copy buffer"))
 
 (defun nano/switch-to-scratch-buffer (&optional arg)
   "Switch to `*scratch*', creating it first if needed.
@@ -511,16 +538,17 @@ Fresh buffer defaults to `org-mode'."
   (message "Copied: %d chars" (- (point-max) (point-min))))
 
 ;; 5c. Window  (SPC w)  — basic splits & navigation
-(define-key spacemacs-leader-map (kbd "w /") 'split-window-right)   ; vsplit
-(define-key spacemacs-leader-map (kbd "w s") 'split-window-below)   ; hsplit
-(define-key spacemacs-leader-map (kbd "w d") 'delete-window)
-(define-key spacemacs-leader-map (kbd "w m") 'delete-other-windows) ; maximize
-(define-key spacemacs-leader-map (kbd "w h") 'evil-window-left)
-(define-key spacemacs-leader-map (kbd "w j") 'evil-window-down)
-(define-key spacemacs-leader-map (kbd "w k") 'evil-window-up)
-(define-key spacemacs-leader-map (kbd "w l") 'evil-window-right)
-(define-key spacemacs-leader-map (kbd "w r") 'nano/window-rotate-forward)  ; rotate right
-(define-key spacemacs-leader-map (kbd "w R") 'nano/window-rotate-backward) ; rotate left
+(nano/leader-keys
+  ("w /" 'split-window-right            nil) ; vsplit
+  ("w s" 'split-window-below            nil) ; hsplit
+  ("w d" 'delete-window                 nil)
+  ("w m" 'delete-other-windows          nil) ; maximize
+  ("w h" 'evil-window-left              nil)
+  ("w j" 'evil-window-down              nil)
+  ("w k" 'evil-window-up                nil)
+  ("w l" 'evil-window-right             nil)
+  ("w r" 'nano/window-rotate-forward    nil) ; rotate right
+  ("w R" 'nano/window-rotate-backward   nil)) ; rotate left
 ;; SPC w 2 / SPC w 3 / SPC w 4 (double/triple/quad columns) defined in §6c — kept with its implementation.
 
 ;; 5d. Quit / session  (SPC q)
@@ -2962,40 +2990,25 @@ With negative N, comment out original line and use the absolute value."
 (straight-use-package 'link-hint)
 
 ;; 15d. Bindings
-(define-key spacemacs-leader-map (kbd "x d SPC") 'cycle-spacing)
-(define-key spacemacs-leader-map (kbd "x d l") 'delete-blank-lines)
-(define-key spacemacs-leader-map (kbd "x d w") 'delete-trailing-whitespace)
-(define-key spacemacs-leader-map (kbd "x l d") 'nano/duplicate-line-or-region)
-(define-key spacemacs-leader-map (kbd "x l s") 'nano/sort-lines)
-(define-key spacemacs-leader-map (kbd "x l S") 'nano/sort-lines-reverse)
-(define-key spacemacs-leader-map (kbd "x l u") 'nano/uniquify-lines)
-(define-key spacemacs-leader-map (kbd "x U") 'upcase-region)
-(define-key spacemacs-leader-map (kbd "x u") 'downcase-region)
-(define-key spacemacs-leader-map (kbd "x C") 'capitalize-region)
-(define-key spacemacs-leader-map (kbd "x c") 'count-words-region)
-(define-key spacemacs-leader-map (kbd "x f") 'fill-paragraph)
-(define-key spacemacs-leader-map (kbd "x TAB") 'indent-rigidly)
-(define-key spacemacs-leader-map (kbd "x y") 'nano/copy-url-at-point)
-(define-key spacemacs-leader-map (kbd "x Y") 'link-hint-copy-link)
-(which-key-add-key-based-replacements
-  "SPC x" "text"
-  "SPC x d" "delete"
-  "SPC x d SPC" "cycle spacing"
-  "SPC x d l" "delete blank lines"
-  "SPC x d w" "delete trailing whitespace"
-  "SPC x l" "lines"
-  "SPC x l d" "duplicate line/region"
-  "SPC x l s" "sort lines"
-  "SPC x l S" "sort lines reverse"
-  "SPC x l u" "uniquify lines"
-  "SPC x U" "upcase region"
-  "SPC x u" "downcase region"
-  "SPC x C" "capitalize region"
-  "SPC x c" "count words"
-  "SPC x f" "fill paragraph"
-  "SPC x TAB" "indent rigidly"
-  "SPC x y" "copy URL at point"
-  "SPC x Y" "copy link (hint)")
+(nano/leader-keys
+  ("x"       nil                        "text")
+  ("x d"     nil                        "delete")
+  ("x d SPC" 'cycle-spacing             "cycle spacing")
+  ("x d l"   'delete-blank-lines        "delete blank lines")
+  ("x d w"   'delete-trailing-whitespace "delete trailing whitespace")
+  ("x l"     nil                        "lines")
+  ("x l d"   'nano/duplicate-line-or-region "duplicate line/region")
+  ("x l s"   'nano/sort-lines           "sort lines")
+  ("x l S"   'nano/sort-lines-reverse   "sort lines reverse")
+  ("x l u"   'nano/uniquify-lines       "uniquify lines")
+  ("x U"     'upcase-region             "upcase region")
+  ("x u"     'downcase-region           "downcase region")
+  ("x C"     'capitalize-region         "capitalize region")
+  ("x c"     'count-words-region        "count words")
+  ("x f"     'fill-paragraph            "fill paragraph")
+  ("x TAB"   'indent-rigidly            "indent rigidly")
+  ("x y"     'nano/copy-url-at-point    "copy URL at point")
+  ("x Y"     'link-hint-copy-link       "copy link (hint)"))
 
 ;; Vim-style indent-rigidly motion (Spacemacs parity)
 (with-eval-after-load 'indent
@@ -3961,19 +3974,14 @@ With prefix ARG, also copy to kill-ring + clipboard."
 
 ;; 19d. Bindings (Spacemacs mnemonics: i l s/p/l, i p p, i u;
 ;;      i U kept as Spacemacs-compat alias for i u).
-(define-key spacemacs-leader-map (kbd "i l s") 'nano/insert-lorem-sentences)
-(define-key spacemacs-leader-map (kbd "i l p") 'nano/insert-lorem-paragraphs)
-(define-key spacemacs-leader-map (kbd "i l l") 'nano/insert-lorem-list)
-(define-key spacemacs-leader-map (kbd "i p") 'nano/insert-password)
-(define-key spacemacs-leader-map (kbd "i u") 'nano/insert-uuid-v4)
-(which-key-add-key-based-replacements
-  "SPC i" "insert"
-  "SPC i l" "lorem ipsum"
-  "SPC i l s" "insert sentences"
-  "SPC i l p" "insert paragraphs"
-  "SPC i l l" "insert list"
-  "SPC i p" "insert password"
-  "SPC i u" "insert UUID v4")
+(nano/leader-keys
+  ("i"     nil                          "insert")
+  ("i l"   nil                          "lorem ipsum")
+  ("i l s" 'nano/insert-lorem-sentences "insert sentences")
+  ("i l p" 'nano/insert-lorem-paragraphs "insert paragraphs")
+  ("i l l" 'nano/insert-lorem-list      "insert list")
+  ("i p"   'nano/insert-password        "insert password")
+  ("i u"   'nano/insert-uuid-v4         "insert UUID v4"))
 
 
 ;; ---------------------------------------------------------------------
@@ -4360,13 +4368,10 @@ changes still need SPC q r (nano load order)."
 (straight-use-package 'elfeed-protocol)
 (straight-use-package 'elfeed-goodies)
 
-(define-key spacemacs-leader-map (kbd "a r") 'elfeed)
-(define-key spacemacs-leader-map (kbd "a w w") 'eww)
-(define-key spacemacs-leader-map (kbd "a w r") 'eww-readable)
-(which-key-add-key-based-replacements
-  "SPC a r" "elfeed"
-  "SPC a w w" "eww"
-  "SPC a w r" "eww-readable")
+(nano/leader-keys
+  ("a r"   'elfeed       "elfeed")
+  ("a w w" 'eww          "eww")
+  ("a w r" 'eww-readable "eww-readable"))
 
 ;; 23a0. Evil-collection truce — deterministic nano keys.
 ;;      Collection setup binds theme ids by default keys in elfeed maps
@@ -4774,8 +4779,8 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 (setq expand-region-contract-fast-key "V"
       expand-region-reset-fast-key "r")
 
-(define-key spacemacs-leader-map (kbd "v") 'er/expand-region)
-(which-key-add-key-based-replacements "SPC v" "expand region")
+(nano/leader-keys
+  ("v" 'er/expand-region "expand region"))
 
 ;; ---------------------------------------------------------------------
 ;; §25  Keepass  (keepass-mode, .kdbx open, evilified parity)
@@ -4840,8 +4845,8 @@ unconditionally, so a raw use yields a doubled id and silently skips."
 (add-to-list 'load-path (expand-file-name "~/animalspirit/emacs"))
 (autoload 'animal-spirit "animal-spirit" nil t)
 
-(define-key spacemacs-leader-map (kbd "a a") 'animal-spirit)
-(which-key-add-key-based-replacements "SPC a a" "animal spirit")
+(nano/leader-keys
+  ("a a" 'animal-spirit "animal spirit"))
 
 
 ;; ---------------------------------------------------------------------
@@ -4937,26 +4942,17 @@ the whole client for a shell-out."
 ;; `opencode' / `opencode-open-session' default to the project root and
 ;; prompt only with C-u.  Context commands use the active region, else
 ;; the 10 lines around point.
-(define-key spacemacs-leader-map (kbd "a c n") 'opencode)
-(define-key spacemacs-leader-map (kbd "a c o") 'opencode-open-session)
-(define-key spacemacs-leader-map (kbd "a c a") 'opencode-ask)
-(define-key spacemacs-leader-map (kbd "a c A") 'opencode-ask-contextual)
-(define-key spacemacs-leader-map (kbd "a c s") 'opencode-send-to-session)
-(define-key spacemacs-leader-map (kbd "a c S") 'opencode-send-context-to-session)
-(define-key spacemacs-leader-map (kbd "a c m") 'nano/opencode-mcp-status)
-(define-key spacemacs-leader-map (kbd "a c x") 'opencode-disconnect)
-(define-key spacemacs-leader-map (kbd "a c R") 'opencode-restart)
-(which-key-add-key-based-replacements
-  "SPC a c" "opencode"
-  "SPC a c n" "new session"
-  "SPC a c o" "open session"
-  "SPC a c a" "ask (new session)"
-  "SPC a c A" "ask with context"
-  "SPC a c s" "send to session"
-  "SPC a c S" "send context to session"
-  "SPC a c m" "mcp list"
-  "SPC a c x" "disconnect"
-  "SPC a c R" "restart service")
+(nano/leader-keys
+  ("a c"   nil                              "opencode")
+  ("a c n" 'opencode                        "new session")
+  ("a c o" 'opencode-open-session           "open session")
+  ("a c a" 'opencode-ask                    "ask (new session)")
+  ("a c A" 'opencode-ask-contextual         "ask with context")
+  ("a c s" 'opencode-send-to-session        "send to session")
+  ("a c S" 'opencode-send-context-to-session "send context to session")
+  ("a c m" 'nano/opencode-mcp-status        "mcp list")
+  ("a c x" 'opencode-disconnect             "disconnect")
+  ("a c R" 'opencode-restart                "restart service"))
 
 ;; 27b. Curated `,' / `SPC m' menu — session buffer.
 ;; Groups: s session / a agent / m model / g git (magit).
@@ -5935,20 +5931,14 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
   (evil-set-initial-state 'shell-mode 'insert)
   (evil-set-initial-state 'term-mode 'insert))
 
-(define-key spacemacs-leader-map (kbd "'") 'eshell)
-(define-key spacemacs-leader-map (kbd "a t e") 'eshell)
-(define-key spacemacs-leader-map (kbd "a t s") 'shell)
-(define-key spacemacs-leader-map (kbd "a t t") 'term)
-(define-key spacemacs-leader-map (kbd "a t a") 'ansi-term)
-(define-key spacemacs-leader-map (kbd "p '") 'project-eshell)
-(which-key-add-key-based-replacements
-  "SPC '" "eshell"
-  "SPC a t" "shell/terminal"
-  "SPC a t e" "eshell"
-  "SPC a t s" "shell"
-  "SPC a t t" "term"
-  "SPC a t a" "ansi-term"
-  "SPC p '" "project eshell")
+(nano/leader-keys
+  ("'"     'eshell         "eshell")
+  ("p '"   'project-eshell "project eshell")
+  ("a t"   nil             "shell/terminal")
+  ("a t e" 'eshell         "eshell")
+  ("a t s" 'shell          "shell")
+  ("a t t" 'term           "term")
+  ("a t a" 'ansi-term      "ansi-term"))
 
 ;; ---------------------------------------------------------------------
 ;; §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
@@ -5981,9 +5971,8 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
 (with-eval-after-load 'evil
   (evil-set-initial-state 'ghostel-mode 'insert))
 
-(define-key spacemacs-leader-map (kbd "a t g") 'ghostel)
-(which-key-add-key-based-replacements
-  "SPC a t g" "ghostel")
+(nano/leader-keys
+  ("a t g" 'ghostel "ghostel"))
 
 ;; ---------------------------------------------------------------------
 ;; §31  Matrix chat  (alphapapa/ement.el, SPC a m, lazy)
@@ -6092,30 +6081,20 @@ which-key and `describe-key' report something readable."
 (nano/ement-command nano/ement-notifications 'ement #'ement-notify-switch-to-notifications-buffer
   "Jump to the *Ement Notifications* buffer.  SPC a m n.")
 
-(define-key spacemacs-leader-map (kbd "a m c") 'nano/ement-connect)
-(define-key spacemacs-leader-map (kbd "a m x") 'nano/ement-disconnect)
-(define-key spacemacs-leader-map (kbd "a m k") 'nano/ement-kill-buffers)
-(define-key spacemacs-leader-map (kbd "a m l") 'nano/ement-room-list)
-(define-key spacemacs-leader-map (kbd "a m v") 'nano/ement-view-room)
-(define-key spacemacs-leader-map (kbd "a m j") 'nano/ement-join-room)
-(define-key spacemacs-leader-map (kbd "a m d") 'nano/ement-direct-message)
-(define-key spacemacs-leader-map (kbd "a m p") 'nano/ement-directory)
-(define-key spacemacs-leader-map (kbd "a m s") 'nano/ement-directory-search)
-(define-key spacemacs-leader-map (kbd "a m m") 'nano/ement-mentions)
-(define-key spacemacs-leader-map (kbd "a m n") 'nano/ement-notifications)
-(which-key-add-key-based-replacements
-  "SPC a m" "matrix"
-  "SPC a m c" "connect"
-  "SPC a m x" "disconnect"
-  "SPC a m k" "kill buffers"
-  "SPC a m l" "room list"
-  "SPC a m v" "view room"
-  "SPC a m j" "join room"
-  "SPC a m d" "direct message"
-  "SPC a m p" "room directory"
-  "SPC a m s" "directory search"
-  "SPC a m m" "mentions"
-  "SPC a m n" "notifications")
+(nano/leader-keys
+  ;; "a m" has no command: label-only group for the which-key menu.
+  ("a m"   nil                           "matrix")
+  ("a m c" 'nano/ement-connect           "connect")
+  ("a m x" 'nano/ement-disconnect        "disconnect")
+  ("a m k" 'nano/ement-kill-buffers      "kill buffers")
+  ("a m l" 'nano/ement-room-list         "room list")
+  ("a m v" 'nano/ement-view-room         "view room")
+  ("a m j" 'nano/ement-join-room         "join room")
+  ("a m d" 'nano/ement-direct-message    "direct message")
+  ("a m p" 'nano/ement-directory         "room directory")
+  ("a m s" 'nano/ement-directory-search  "directory search")
+  ("a m m" 'nano/ement-mentions          "mentions")
+  ("a m n" 'nano/ement-notifications     "notifications"))
 
 ;; evil-collection: opt in (one symbol).  Loaded at init time, before the
 ;; first `nano/evil-collection-ensure' call, so the deferred

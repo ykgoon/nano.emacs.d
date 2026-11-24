@@ -97,6 +97,13 @@ Emacs distro on [rougier/nano-emacs](https://github.com/rougier/nano-emacs), man
 - `M-<`/`M->` (`icomplete-vertical-goto-first`/`-last`) are deliberately NOT advised. Their stock bodies are `(while (icomplete-backward-completions))` and only terminate because `icomplete-scroll` is non-nil; this config leaves `icomplete-scroll` nil, so stock correctly signals "Only works with `icomplete-scroll'". A rotation-based replacement cannot know when it has reached the first entry and would spin forever.
 - Reproducing completion bugs needs a real TTY: `emacs --batch` cannot service a minibuffer (`end-of-file "Error reading from stdin"`), and `ssh` without `-tt` leaves `emacs -nw` without a terminal, so the run silently produces nothing and a stale output file looks like a pass. Use `ssh -tt … emacs -nw -l init.el -l script.el` with results written to a file (the minibuffer overwrites the echo area), feeding keys via `run-with-timer` + `execute-kbd-macro`.
 
+## Leader key bindings (§4a)
+- Bind with `nano/leader-keys`, not raw `define-key`. One form per key, label inline:
+  `(nano/leader-keys ("a m c" 'nano/ement-connect "connect"))`. It emits the `define-key` **and** the `which-key-add-key-based-replacements` entry from the same triple, so the key string appears once instead of three times (key / `"SPC key"` / regex). Before this the file had ~140 leader keys, each duplicated into a hand-written `"SPC …"` label cell — the largest duplication axis and a silent desync if either copy drifted.
+- `("key" nil "label")` = label-only group heading (no command bound); `("key" 'cmd nil)` = bind with no label, which keeps which-key's command-name fallback. Both are used deliberately; do not "fix" them.
+- The macro is idempotent under `SPC f e r` — `define-key` overwrites, and repeated loads leave the same 22 top-level prefix keys.
+- Bindings live with the feature that owns them, not in §5. §5 holds only cross-cutting keys (file/buffer/window/quit). Feature keys belong next to their implementation (opencode §27, elfeed §23, roam §21, ement §31, …).
+
 ## Workflow
 - Add a package: add `(straight-use-package '(pkg :type git :host github :repo "user/pkg"))` + `(require 'pkg)` in `init.el`.
 - Edited a vendored package under `straight/repos/`? `M-x straight-rebuild-package RET <pkg>`, or `M-x straight-pull-all` to sync upstream.
