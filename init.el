@@ -6000,6 +6000,43 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
 ;; room buffers — scroll with C-d/C-u or S-SPC there.
 (straight-use-package 'ement)
 
+;; Login persistence.  Ement keeps ONE thing across restarts: the
+;; account's access token (plus user id / homeserver / device id).  The
+;; password is never written anywhere — `read-passwd' feeds it straight
+;; into the login request, and `ement--login-callback' stores only the
+;; token the server hands back.  An access token can be revoked
+;; server-side at any time (Element: Settings -> Sessions), so this is a
+;; per-device key, not your credentials.
+;;
+;; BEWARE: `ement-save-sessions' has a `:set' function that installs
+;; `ement--kill-emacs-hook'.  A plain `setq' sets the variable but never
+;; installs the hook, so the value looks right, nothing is ever written,
+;; and you re-login on every restart.  `customize-set-variable' runs the
+;; `:set' — but only once ement is LOADED (before that the symbol has no
+;; `:set' property, so it silently degrades to a plain set).  Set the
+;; value here and add the hook explicitly, so neither the load order nor
+;; a `:set' refactor can lose it.
+;;
+;; Also: `ement--write-sessions' uses `with-temp-file', and its kill hook
+;; wraps everything in `ignore-errors' — a missing parent directory fails
+;; SILENTLY and costs you the session.  Create the directory up front.
+;;
+;; Token expires or is revoked -> sync dies with M_UNKNOWN_TOKEN and the
+;; saved session is not auto-cleared; re-login with `C-u SPC a m c'
+;; (universal prefix forces a fresh login).
+(setq ement-sessions-file
+      (expand-file-name "var/ement/sessions.el" user-emacs-directory))
+(make-directory (file-name-directory ement-sessions-file) t)
+;; 0700: the file holds a live access token (ement chmods the file 0600
+;; itself, but the directory is ours to set).
+(ignore-errors
+  (set-file-modes (file-name-directory ement-sessions-file) #o700))
+(setq ement-save-sessions t)
+(with-eval-after-load 'ement
+  (add-hook 'kill-emacs-hook #'ement--kill-emacs-hook))
+;; `restart-emacs' goes through `save-buffers-kill-emacs', so SPC q r
+;; runs `kill-emacs-hook' like a normal quit; both paths save.
+
 (defmacro nano/ement-command (name feature command docstring)
   "Define NAME as a lazy entry for Ement's COMMAND.
 FEATURE is required first.  NAME stays a real named command so
