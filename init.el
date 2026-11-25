@@ -5916,7 +5916,7 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
 
 
 ;; ---------------------------------------------------------------------
-;; §29  Shell  (builtins, SPC ' + SPC a t, lazy)
+;; §29  Shell  (builtins, SPC a t, lazy; SPC ' is ghostel, see §30)
 ;; ---------------------------------------------------------------------
 ;; Zero-dep: built-in eshell/shell/term/ansi-term + project-eshell only.
 ;; No vterm/eat/shell-pop (compiler/fetch/split mgmt, add on demand).
@@ -5927,14 +5927,13 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
 ;; term char mode eats SPC: use C-SPC leader fallback (§4) or C-c C-j
 ;; line mode.  §2b2 term-sentinel advice already kills term buffer on exit.
 ;; No `require': all commands autoload.  Reload-safe via `SPC f e r'.
-;; Example: `SPC '' eshell here, `SPC p '' eshell at project root.
+;; Example: `SPC p '' eshell at project root.
 (with-eval-after-load 'evil
   (evil-set-initial-state 'eshell-mode 'insert)
   (evil-set-initial-state 'shell-mode 'insert)
   (evil-set-initial-state 'term-mode 'insert))
 
 (nano/leader-keys
-  ("'"     'eshell         "eshell")
   ("p '"   'project-eshell "project eshell")
   ("a t"   nil             "shell/terminal")
   ("a t e" 'eshell         "eshell")
@@ -5943,13 +5942,13 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
   ("a t a" 'ansi-term      "ansi-term"))
 
 ;; ---------------------------------------------------------------------
-;; §30  Ghostel  (libghostty terminal, SPC a t g, lazy)
+;; §30  Ghostel  (libghostty terminal, SPC ' + SPC a t g, lazy)
 ;; ---------------------------------------------------------------------
 ;; Second terminal backend next to the §29 builtins: a real VT engine
 ;; (libghostty-vt, the one inside Ghostty) as a native Emacs module --
 ;; true color, synchronized output, Kitty keyboard/graphics, hyperlinks,
 ;; OSC 7/133 shell integration injected for bash/zsh/fish, no rc edit.
-;; Lazy: `ghostel' is autoloaded, so `SPC a t g' costs nothing until
+;; Lazy: `ghostel' is autoloaded, so `SPC '' / `SPC a t g' cost nothing until
 ;; first use; that call loads ghostel.el, which maps the native module.
 ;; Native module: pre-built libghostty .so, no zig toolchain needed.
 ;; `ghostel-module-directory' points at var/ghostel/ -- deliberately
@@ -5974,6 +5973,7 @@ sessions cannot be detected.  Upgrade with `opencode upgrade --major'."
   (evil-set-initial-state 'ghostel-mode 'insert))
 
 (nano/leader-keys
+  ("'"     'ghostel "ghostel")
   ("a t g" 'ghostel "ghostel"))
 
 ;; ---------------------------------------------------------------------
